@@ -1,0 +1,9 @@
+#ifndef HTTP_STATUS_CODE
+#define HTTP_STATUS_CODE
+
+enum HttpStatusCode {
+    HTTP_STATUS_OK = 200,
+    HTTP_STATUS_BAD_REQUEST = 400
+};
+
+#endif // !HTTP_STATUS_CODE

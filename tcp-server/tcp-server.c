@@ -1,5 +1,9 @@
+#include <assert.h>
+#include <corecrt_search.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 #pragma comment(lib, "Ws2_32.lib")
 #include <WS2tcpip.h>
@@ -11,6 +15,7 @@ typedef struct sockaddr sockaddr;
 
 #define SERVER_PORT 8080
 #define MAX_SOCKETS 60
+#define GROWTH_FACTOR 2
 
 #define EMPTY 0
 #define LISTEN 1
@@ -24,18 +29,17 @@ typedef struct SocketState {
   SOCKET id;
   int recv;
   int send;
-  int sendSubType;
-  char buffer[128];
   int len;
 } SocketState;
+
 SocketState sockets[MAX_SOCKETS] = {0};
 int socketsCount = 0;
 
 bool addSocket(SOCKET id, int what);
 void removeSocket(int index);
 void acceptConnection(int index);
-void receiveMessage(int index);
-void sendMessage(int index);
+void receiveRequest(int index);
+void sendResponse(int index);
 
 typedef struct WebApplication {
   int (*run)(void);
@@ -85,6 +89,7 @@ int _web_application_run(void) {
     return 1;
   }
 
+  printf("Server: listening on %s:%d\n", "127.0.0.1", SERVER_PORT);
   addSocket(listenSocket, LISTEN);
 
   while (true) {
@@ -95,7 +100,7 @@ int _web_application_run(void) {
     for (int i = 0; i < MAX_SOCKETS; i++) {
       if ((sockets[i].recv == LISTEN) || (sockets[i].recv == RECEIVE))
         FD_SET(sockets[i].id, &waitRecv);
-      else if (sockets[i].send == SEND)
+      if (sockets[i].send == SEND)
         FD_SET(sockets[i].id, &waitSend);
     }
 
@@ -115,14 +120,15 @@ int _web_application_run(void) {
           acceptConnection(i);
           break;
         case RECEIVE:
-          receiveMessage(i);
+          receiveRequest(i);
           break;
         }
-      } else if (FD_ISSET(sockets[i].id, &waitSend)) {
+      }
+      if (FD_ISSET(sockets[i].id, &waitSend)) {
         nfd--;
         switch (sockets[i].send) {
         case SEND:
-          sendMessage(i);
+          sendResponse(i);
           break;
         }
       }
@@ -184,7 +190,7 @@ void acceptConnection(int index) {
   }
 }
 
-void receiveMessage(int index) {
+void receiveRequest(int index) {
   SOCKET msgSocket = sockets[index].id;
 
   int len = sockets[index].len;
@@ -233,7 +239,7 @@ void receiveMessage(int index) {
   }
 }
 
-void sendMessage(int index) {
+void sendResponse(int index) {
   int bytesSent = 0;
   char sendBuff[255];
 
