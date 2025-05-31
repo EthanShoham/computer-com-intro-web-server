@@ -9,8 +9,8 @@
 #pragma comment(lib, "Ws2_32.lib")
 #include "http_request.h"
 #include "http_response.h"
-#include "web-server-internal/http_query_internal.h"
 #include "web-server-internal/http_headers_internal.h"
+#include "web-server-internal/http_query_internal.h"
 #include "web_server.h"
 #include <WS2tcpip.h>
 #include <WinSock2.h>
@@ -94,57 +94,57 @@ typedef enum SocketRecvState {
 #define BUFFER_SIZE 256
 
 typedef struct CycleBuffer {
-    char buffer[BUFFER_SIZE];
-    size_t start;
-    size_t end;
-    bool empty;
+  char buffer[BUFFER_SIZE];
+  size_t start;
+  size_t end;
+  bool empty;
 } CycleBuffer;
 
-static size_t cyctle_buffer_used_space(const CycleBuffer* buffer) {
-    if (!buffer->empty && buffer->start == buffer->end) {
-        return BUFFER_SIZE;
-    }
+static size_t cyctle_buffer_used_space(const CycleBuffer *buffer) {
+  if (!buffer->empty && buffer->start == buffer->end) {
+    return BUFFER_SIZE;
+  }
 
-    if (buffer->start == buffer->end) {
-        return 0;
-    }
+  if (buffer->start == buffer->end) {
+    return 0;
+  }
 
-    if (buffer->end < buffer->start) {
-        return buffer->end + (BUFFER_SIZE - buffer->start) - 1;
-    }
+  if (buffer->end < buffer->start) {
+    return buffer->end + (BUFFER_SIZE - buffer->start) - 1;
+  }
 
-    return buffer->end - buffer->start;
+  return buffer->end - buffer->start;
 }
 
-static bool cyctle_buffer_has_space(const CycleBuffer* buffer) {
-    return BUFFER_SIZE - cyctle_buffer_used_space(buffer) > 0;
+static bool cyctle_buffer_has_space(const CycleBuffer *buffer) {
+  return BUFFER_SIZE - cyctle_buffer_used_space(buffer) > 0;
 }
 
-static bool cyctle_buffer_add_char(CycleBuffer* buffer, char c) {
-    if (!buffer->empty && buffer->end == buffer->start) {
-        return false;
-    }
+static bool cyctle_buffer_add_char(CycleBuffer *buffer, char c) {
+  if (!buffer->empty && buffer->end == buffer->start) {
+    return false;
+  }
 
-    buffer->buffer[buffer->end++] = c;
-    buffer->end = buffer->end % BUFFER_SIZE;
-    buffer->empty = false;
+  buffer->buffer[buffer->end++] = c;
+  buffer->end = buffer->end % BUFFER_SIZE;
+  buffer->empty = false;
 }
 
-static bool cyctle_buffer_take_char(CycleBuffer* buffer, char* out_c) {
-    assert(out_c);
-    if (buffer->empty) {
-        return false;
-    }
+static bool cyctle_buffer_take_char(CycleBuffer *buffer, char *out_c) {
+  assert(out_c);
+  if (buffer->empty) {
+    return false;
+  }
 
-    *out_c = buffer->buffer[buffer->start++];
-    buffer->start = buffer->start % BUFFER_SIZE;
-    if (buffer->start == buffer->end) {
-        buffer->empty = true;
-    }
+  *out_c = buffer->buffer[buffer->start++];
+  buffer->start = buffer->start % BUFFER_SIZE;
+  if (buffer->start == buffer->end) {
+    buffer->empty = true;
+  }
 }
 
-static bool cyctle_buffer_is_empty(const CycleBuffer* buffer) {
-    return buffer->empty;
+static bool cyctle_buffer_is_empty(const CycleBuffer *buffer) {
+  return buffer->empty;
 }
 
 typedef struct SocketState {
@@ -153,7 +153,7 @@ typedef struct SocketState {
 
   SocketRecvState recv_state;
   CycleBuffer recv_buffer;
-  
+
   SocketSendState send_state;
   CycleBuffer send_buffer;
 
@@ -183,21 +183,22 @@ const HttpHeaders *req_get_headers(const HttpRequest *req) {
   return req->headers;
 }
 
-bool req_start_read(HttpRequest* req) {
-    assert(req && "req_can_read: req is null.");
-    assert(req->state != HTTP_REQUEST_READING_HEADER &&
-        "req_can_read: cannot accesse body bofore finished reading headers.");
-    assert(req->socket_state &&
-        "req_can_read: req has a null socket_state, something went wrong!");
+bool req_start_read(HttpRequest *req) {
+  assert(req && "req_can_read: req is null.");
+  assert(req->state != HTTP_REQUEST_READING_HEADER &&
+         "req_can_read: cannot accesse body bofore finished reading headers.");
+  assert(req->socket_state &&
+         "req_can_read: req has a null socket_state, something went wrong!");
 
-    SocketState* socket_state = req->socket_state;
+  SocketState *socket_state = req->socket_state;
 
-    if (req->content_length > 0 && socket_state->recv_state != SOCKET_RECV_FINISHED) {
-        socket_state->recv_state = SOCKET_RECV_ACTIVE;
-        return true;
-    }
+  if (req->content_length > 0 &&
+      socket_state->recv_state != SOCKET_RECV_FINISHED) {
+    socket_state->recv_state = SOCKET_RECV_ACTIVE;
+    return true;
+  }
 
-    return false;
+  return false;
 }
 size_t req_read(HttpRequest *req, char *buffer, size_t length) {
   assert(req && "req_read: req is null.");
@@ -224,8 +225,8 @@ size_t req_read(HttpRequest *req, char *buffer, size_t length) {
   req->content_read += chars_read_count;
 
   if (req->content_read == req->content_length) {
-      state->recv_state = SOCKET_RECV_FINISHED;
-      state->http_request.state = HTTP_REQUSET_DONE;
+    state->recv_state = SOCKET_RECV_FINISHED;
+    state->http_request.state = HTTP_REQUSET_DONE;
   }
 
   return chars_read_count;
@@ -250,7 +251,8 @@ void res_set_status_code(HttpResponse *res, enum HttpStatusCode code) {
       break;
     }
 
-    cyctle_buffer_add_char(&state->send_buffer, status_line[chars_wrote_count++]);
+    cyctle_buffer_add_char(&state->send_buffer,
+                           status_line[chars_wrote_count++]);
   }
 
   res->http_status_code = code;
@@ -335,7 +337,7 @@ size_t res_wirte(HttpResponse *res, const char *buffer, size_t length) {
   return chars_wrote_count;
 }
 
-
+typedef void (*request_handler)(HttpRequest* req, HttpResponse* res);
 
 typedef struct WebServer {
   SocketState socket_states[MAX_CONNECTIONS];
@@ -350,6 +352,8 @@ static void send_data(SocketState *socket_state);
 static unsigned long long get_currect_time_stamp();
 static void parse_request_header(SocketState *socket_state);
 static void fill_send_with_headers(SocketState *socket_state);
+static void zero_socket_state(SocketState *state);
+static request_handler find_matching_handler(WebServer *server, HttpRequest* req);
 
 int web_server_run(WebServer *server) {
   WSAData wsa_data;
@@ -402,6 +406,10 @@ int web_server_run(WebServer *server) {
 
   SocketState *sockets = server->socket_states;
 
+    for (size_t i = 0; i < MAX_CONNECTIONS; i++) {
+    zero_socket_state(&sockets[i]);
+  }
+
   while (true) {
     unsigned long long current_time = get_currect_time_stamp();
     FD_ZERO(&wait_recv);
@@ -409,9 +417,9 @@ int web_server_run(WebServer *server) {
 
     FD_SET(listen_socket, &wait_recv);
     for (int i = 0; i < MAX_CONNECTIONS; i++) {
-        if (sockets[i].socket == 0) {
-            continue;
-        }
+      if (sockets[i].socket == 0) {
+        continue;
+      }
       if (sockets[i].recv_state == SOCKET_RECV_ACTIVE)
         FD_SET(sockets[i].socket, &wait_recv);
       if (sockets[i].send_state == SOCKET_SEND_ACTIVE)
@@ -449,8 +457,6 @@ int web_server_run(WebServer *server) {
         parse_request_header(&sockets[i]);
       }
 
-
-
       // fill send buffer with headers
       if (sockets[i].http_response.headers_send_state == SOCKET_SEND_ACTIVE) {
         fill_send_with_headers(&sockets[i]);
@@ -469,9 +475,9 @@ int web_server_run(WebServer *server) {
           sockets[i].send_state != SOCKET_SEND_ACTIVE) {
         remove_connection(server, i);
       }
-      
+
       // if time out remove connection
-      //if (sockets[i].timeout_time < current_time){
+      // if (sockets[i].timeout_time < current_time){
       //  remove_connection(server, i);
       //}
     }
@@ -480,8 +486,8 @@ int web_server_run(WebServer *server) {
   for (size_t i = 0; i < MAX_CONNECTIONS; i++) {
     if (sockets[i].socket) {
       closesocket(sockets[i].socket);
-      sockets[i].socket = 0;
     }
+    remove_connection(server, i);
   }
 
   printf("Server: Closing Connection.\n");
@@ -568,16 +574,7 @@ static bool add_connection(WebServer *server, SOCKET connection_socket) {
   return false;
 }
 
-static void remove_connection(WebServer *server, size_t index) {
-  assert(server && "remove_connection: server is null.");
-  assert(index < MAX_CONNECTIONS &&
-         "remove_connection: index is larger then MAX_CONNECTION.");
-  assert(server->socket_states[index].socket != 0 &&
-         "remove_connection: no connection in this index.");
-
-  SocketState *state = &server->socket_states[index];
-
-  closesocket(state->socket);
+static void zero_socket_state(SocketState *state) {
   state->socket = 0;
 
   state->recv_state = 0;
@@ -632,6 +629,19 @@ static void remove_connection(WebServer *server, size_t index) {
   state->timeout_time = 0;
 }
 
+static void remove_connection(WebServer *server, size_t index) {
+  assert(server && "remove_connection: server is null.");
+  assert(index < MAX_CONNECTIONS &&
+         "remove_connection: index is larger then MAX_CONNECTION.");
+  assert(server->socket_states[index].socket != 0 &&
+         "remove_connection: no connection in this index.");
+
+  SocketState *state = &server->socket_states[index];
+
+  closesocket(state->socket);
+  zero_socket_state(state);
+}
+
 static unsigned long long get_currect_time_stamp() {
   FILETIME curr;
   GetSystemTimePreciseAsFileTime(&curr);
@@ -670,7 +680,7 @@ static void receive_data(SocketState *socket_state) {
   }
 
   for (size_t i = 0; i < bytes_recv; i++) {
-      cyctle_buffer_add_char(&socket_state->recv_buffer, temp_buffer[i]);
+    cyctle_buffer_add_char(&socket_state->recv_buffer, temp_buffer[i]);
   }
 }
 
@@ -688,7 +698,7 @@ static void send_data(SocketState *socket_state) {
 
   char temp_buffer[BUFFER_SIZE];
   for (size_t i = 0; i < used_space; i++) {
-      cyctle_buffer_take_char(&socket_state->send_buffer, &temp_buffer[i]);
+    cyctle_buffer_take_char(&socket_state->send_buffer, &temp_buffer[i]);
   }
 
   size_t bytes_sent = send(msg_socket, temp_buffer, sizeof(temp_buffer), 0);
@@ -712,7 +722,7 @@ static void send_data(SocketState *socket_state) {
 }
 
 static void fill_send_with_headers(SocketState *socket_state) {
-    size_t used_space = cyctle_buffer_used_space(&socket_state->send_buffer);
+  size_t used_space = cyctle_buffer_used_space(&socket_state->send_buffer);
   size_t free_space = BUFFER_SIZE - used_space;
   if (free_space == 0) {
     return;
@@ -741,7 +751,7 @@ static void fill_send_with_headers(SocketState *socket_state) {
                            : headers_get_key_at_index(headers, headers_index);
     size_t word_len = strlen(word);
     for (; word_index < word_len && free_space > 0; word_index++) {
-        cyctle_buffer_add_char(&socket_state->send_buffer, word[word_index]);
+      cyctle_buffer_add_char(&socket_state->send_buffer, word[word_index]);
       free_space--;
     }
 
@@ -752,8 +762,8 @@ static void fill_send_with_headers(SocketState *socket_state) {
         word_index = 0;
       } else {
         if (free_space > 1) {
-            cyctle_buffer_add_char(&socket_state->send_buffer, ':');
-            cyctle_buffer_add_char(&socket_state->send_buffer, ' ');
+          cyctle_buffer_add_char(&socket_state->send_buffer, ':');
+          cyctle_buffer_add_char(&socket_state->send_buffer, ' ');
           free_space = free_space - 2;
           is_value = 1;
           word_index = 0;
@@ -837,8 +847,8 @@ static void parse_method(SocketState *socket_state) {
   size_t chars_read;
   bool hit_space = false;
   for (chars_read = 0; chars_read < used_space;) {
-      char c;
-      cyctle_buffer_take_char(&socket_state->recv_buffer, &c);
+    char c;
+    cyctle_buffer_take_char(&socket_state->recv_buffer, &c);
     if (c == ' ') {
       hit_space = true;
       break;
@@ -900,8 +910,8 @@ static void parse_request_target(SocketState *socket_state) {
   size_t chars_read;
   bool hit_space = false;
   for (chars_read = 0; chars_read < used_space;) {
-      char c;
-      cyctle_buffer_take_char(&socket_state->recv_buffer, &c);
+    char c;
+    cyctle_buffer_take_char(&socket_state->recv_buffer, &c);
     if (c == ' ') {
       hit_space = true;
       break;
@@ -979,8 +989,8 @@ static void parse_request_version(SocketState *socket_state) {
   size_t chars_read;
   bool hit_lf = false;
   for (chars_read = 0; chars_read < used_space;) {
-      char c;
-      cyctle_buffer_take_char(&socket_state->recv_buffer, &c);
+    char c;
+    cyctle_buffer_take_char(&socket_state->recv_buffer, &c);
     if (c == '\n') {
       hit_lf = true;
       break;
@@ -1035,102 +1045,100 @@ static void parse_request_field_liens(SocketState *socket_state) {
     context->field_lines[0] = 0;
   }
 
-  while (!cyctle_buffer_is_empty(&socket_state->recv_buffer))
-  {
-      size_t used_space = cyctle_buffer_used_space(&socket_state->recv_buffer);
+  while (!cyctle_buffer_is_empty(&socket_state->recv_buffer)) {
+    size_t used_space = cyctle_buffer_used_space(&socket_state->recv_buffer);
 
-      char temp_buffer[BUFFER_SIZE + 1];
-      size_t chars_read;
-      bool hit_lf = false;
-      for (chars_read = 0; chars_read < used_space;) {
-          char c;
-          cyctle_buffer_take_char(&socket_state->recv_buffer, &c);
-          if (c == '\n') {
-              hit_lf = true;
-              break;
-          }
-          temp_buffer[chars_read++] = c;
+    char temp_buffer[BUFFER_SIZE + 1];
+    size_t chars_read;
+    bool hit_lf = false;
+    for (chars_read = 0; chars_read < used_space;) {
+      char c;
+      cyctle_buffer_take_char(&socket_state->recv_buffer, &c);
+      if (c == '\n') {
+        hit_lf = true;
+        break;
       }
+      temp_buffer[chars_read++] = c;
+    }
 
-      size_t current_len = strlen(context->field_lines);
-      size_t new_size = (current_len + chars_read + 1);
-      char* temp = realloc(context->field_lines, sizeof(char) * new_size);
-      if (temp == NULL) {
-          set_response_server_error(socket_state);
-          return;
-      }
-      for (size_t i = 0; current_len < new_size - 1;) {
-          temp[current_len++] = temp_buffer[i++];
-      }
-      temp[current_len] = 0;
-      context->field_lines = temp;
+    size_t current_len = strlen(context->field_lines);
+    size_t new_size = (current_len + chars_read + 1);
+    char *temp = realloc(context->field_lines, sizeof(char) * new_size);
+    if (temp == NULL) {
+      set_response_server_error(socket_state);
+      return;
+    }
+    for (size_t i = 0; current_len < new_size - 1;) {
+      temp[current_len++] = temp_buffer[i++];
+    }
+    temp[current_len] = 0;
+    context->field_lines = temp;
 
-      if (!hit_lf) {
-          return;
-      }
+    if (!hit_lf) {
+      return;
+    }
 
-      if (context->field_lines[current_len - 1] != '\r') {
+    if (context->field_lines[current_len - 1] != '\r') {
+      set_response_bad_request(socket_state);
+      return;
+    }
+
+    if (context->field_lines[current_len - 2] != '\r') {
+      continue;
+    }
+
+    // finished reading headers
+    context->field_lines[current_len - 2] = 0;
+    current_len = current_len - 2;
+
+    char *key = context->field_lines;
+    while (key[0] != 0) {
+      char *cul_mark = strchr(key, ':');
+      if (cul_mark == NULL) {
+        set_response_bad_request(socket_state);
+        return;
+      }
+      cul_mark[0] = 0;
+      char *key_temp = key;
+      for (size_t i = 0; key[i] != 0; i++) {
+        if (key[i] == ' ' || key[i] == '\t') {
           set_response_bad_request(socket_state);
           return;
+        }
       }
 
-      if (context->field_lines[current_len - 2] != '\r') {
-          continue;
+      char *value = cul_mark + 1;
+      char *cr_mark = strchr(value, '\r');
+      if (cr_mark != NULL) {
+        cr_mark[0] = 0;
       }
 
-      // finished reading headers
-      context->field_lines[current_len - 2] = 0;
-      current_len = current_len - 2;
-
-      char* key = context->field_lines;
-      while (key[0] != 0) {
-          char* cul_mark = strchr(key, ':');
-          if (cul_mark == NULL) {
-              set_response_bad_request(socket_state);
-              return;
-          }
-          cul_mark[0] = 0;
-          char* key_temp = key;
-          for (size_t i = 0; key[i] != 0; i++) {
-              if (key[i] == ' ' || key[i] == '\t') {
-                  set_response_bad_request(socket_state);
-                  return;
-              }
-          }
-
-          char* value = cul_mark + 1;
-          char* cr_mark = strchr(value, '\r');
-          if (cr_mark != NULL) {
-              cr_mark[0] = 0; 
-          }
-
-          while (value[0] == ' ' || value[0] == '\t') {
-              value = value + 1;
-          }
-
-          size_t value_len = strlen(value);
-          for (size_t i = value_len; i >= 0; i--) {
-              if (value[i] != ' ' && value[i] != '\t') {
-                  break;
-              }
-
-              value[i] = 0;
-          }
-
-          if (!headers_add(socket_state->http_request.headers, key, value)) {
-              // TODO: do something?
-          }
-
-          if (cr_mark == NULL) {
-              break;
-          }
-          else {
-              key = cr_mark + 1;
-          }
+      while (value[0] == ' ' || value[0] == '\t') {
+        value = value + 1;
       }
 
-      context->step = HTTP_REQUEST_PARSING_DONE;
-      return;
+      size_t value_len = strlen(value);
+      for (size_t i = value_len; i >= 0; i--) {
+        if (value[i] != ' ' && value[i] != '\t') {
+          break;
+        }
+
+        value[i] = 0;
+      }
+
+      if (!headers_add(socket_state->http_request.headers, key, value)) {
+        // TODO: do something?
+      }
+
+      if (cr_mark == NULL) {
+        break;
+      } else {
+        key = cr_mark + 1;
+      }
+    }
+
+    context->step = HTTP_REQUEST_PARSING_DONE;
+    return;
   }
 }
 
@@ -1160,24 +1168,34 @@ static void parse_request_header(SocketState *socket_state) {
 
   if (context->step == HTTP_REQUEST_PARSING_DONE &&
       socket_state->http_response.state != HTTP_RESPONSE_DONE) {
-      const char* content_length = headers_get(socket_state->http_request.headers, "Content-Length");
-      if (content_length != NULL) {
-          int length = atoi(content_length);
-          if (length > 0) {
-            socket_state->http_request.state = HTTP_REQUEST_READING_BODY;
-            socket_state->recv_state = SOCKET_RECV_IDLE;
-            socket_state->http_request.content_length = content_length;
-            return;
-          }
+    const char *content_length =
+        headers_get(socket_state->http_request.headers, "Content-Length");
+    if (content_length != NULL) {
+      int length = atoi(content_length);
+      if (length > 0) {
+        socket_state->http_request.state = HTTP_REQUEST_READING_BODY;
+        socket_state->recv_state = SOCKET_RECV_IDLE;
+        socket_state->http_request.content_length = length;
+        return;
       }
+    }
 
-      socket_state->http_request.state = HTTP_REQUSET_DONE;
-      socket_state->recv_state = SOCKET_RECV_FINISHED;
+    socket_state->http_request.state = HTTP_REQUSET_DONE;
+    socket_state->recv_state = SOCKET_RECV_FINISHED;
   }
 }
 
-
-int main() {
-    WebServer server = { 0 };
-  return web_server_run(&server);
+static request_handler find_matching_handler(WebServer* server, HttpRequest* req) {
+    server-
 }
+
+WebServer *create_web_server() {
+  WebServer *server = malloc(sizeof(WebServer));
+  assert(server);
+
+  
+
+  return server;
+}
+void web_server_map_get(const char *route,
+                        void (*func)(HttpRequest *req, HttpResponse *res));
