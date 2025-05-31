@@ -10,7 +10,7 @@ void res_set_status_code(HttpResponse *res,enum HttpStatusCode code);
 HttpHeaders* res_get_headers(const HttpResponse* res);
 void res_finish_headers(HttpResponse* res);
 void res_finish_write(HttpResponse* res);
-void res_set_context(HttpResponse* res, const void* context);
+void res_set_context(HttpResponse* res, void* context);
 void* res_get_context(const HttpResponse* res);
 
 bool res_can_write(const HttpResponse* res);

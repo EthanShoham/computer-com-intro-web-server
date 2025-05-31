@@ -1,11 +1,19 @@
-#include <stdio.h>
+#include "http_headers.h"
+#include "http_status_code.h"
 #include <assert.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <winsock2.h>
 #pragma comment(lib, "Ws2_32.lib")
-#include <WS2tcpip.h>
-#include <WinSock2.h>
-#include "web_server.h"
 #include "http_request.h"
 #include "http_response.h"
+#include "web-server-internal/http_query_internal.h"
+#include "web-server-internal/http_headers_internal.h"
+#include "web_server.h"
+#include <WS2tcpip.h>
+#include <WinSock2.h>
 
 typedef struct WSAData WSAData;
 typedef struct sockaddr_in sockaddr_in;
@@ -13,194 +21,335 @@ typedef struct sockaddr sockaddr;
 
 #define SERVER_PORT 8080
 #define MAX_CONNECTIONS 60
+#define TIME_OUT_IN_SEC 30
 
-enum SocketRecvState {
-  SOCKET_RECV_ACTIVE,
-  SOCKET_RECV_IDLE,
-  SOCKET_RECV_FINISHED
-};
+typedef enum HttpRequestState {
+  HTTP_REQUEST_READING_HEADER,
+  HTTP_REQUEST_READING_BODY,
+  HTTP_REQUSET_DONE
+} HttpRequestState;
 
-enum SocketSendState {
+typedef enum HttpRequestParsingStep {
+  HTTP_REQUEST_PRASING_METHOD,
+  HTTP_REQUEST_PARSING_REQUEST_TARGET,
+  HTTP_REQUEST_PARSING_REQUEST_VERSION,
+  HTTP_REQUEST_PARSING_FIELD_LINES,
+  HTTP_REQUEST_PARSING_DONE
+} HttpRequestParsingStep;
+
+typedef struct HttpRequestParsingContext {
+  HttpRequestParsingStep step;
+  char *method;
+  char *request_target;
+  char *version;
+  char *field_lines;
+} HttpRequestParsingContext;
+
+typedef struct HttpRequest {
+  HttpRequestState state;
+
+  HttpMethod method;
+  char *route;
+  HttpQuery *query;
+  HttpHeaders *headers;
+  int content_length;
+  int content_read;
+
+  struct SocketState *socket_state;
+  HttpRequestParsingContext context;
+} HttpRequest;
+
+typedef enum HttpResponseState {
+  HTTP_RESPONSE_WRITING_STATUS_CODE,
+  HTTP_RESPONSE_WRITING_HEADERS,
+  HTTP_RESPONSE_WRITING_BODY,
+  HTTP_RESPONSE_DONE
+} HttpResponseState;
+
+typedef enum SocketSendState {
   SOCKET_SEND_ACTIVE,
   SOCKET_SEND_IDLE,
   SOCKET_SEND_FINISHED
+} SocketSendState;
+
+struct HttpResponse {
+  HttpResponseState state;
+
+  HttpStatusCode http_status_code;
+  HttpHeaders *headers;
+  SocketSendState headers_send_state;
+  size_t write_headers_index[3];
+
+  void *context;
+
+  struct SocketState *socket_state;
 };
 
-#define RECV_BUFFER_SIZE 256
-#define SEND_BUFFER_SIZE 256
+typedef enum SocketRecvState {
+  SOCKET_RECV_ACTIVE,
+  SOCKET_RECV_IDLE,
+  SOCKET_RECV_FINISHED
+} SocketRecvState;
+
+#define BUFFER_SIZE 256
+
+typedef struct CycleBuffer {
+    char buffer[BUFFER_SIZE];
+    size_t start;
+    size_t end;
+    bool empty;
+} CycleBuffer;
+
+static size_t cyctle_buffer_used_space(const CycleBuffer* buffer) {
+    if (!buffer->empty && buffer->start == buffer->end) {
+        return BUFFER_SIZE;
+    }
+
+    if (buffer->start == buffer->end) {
+        return 0;
+    }
+
+    if (buffer->end < buffer->start) {
+        return buffer->end + (BUFFER_SIZE - buffer->start) - 1;
+    }
+
+    return buffer->end - buffer->start;
+}
+
+static bool cyctle_buffer_has_space(const CycleBuffer* buffer) {
+    return BUFFER_SIZE - cyctle_buffer_used_space(buffer) > 0;
+}
+
+static bool cyctle_buffer_add_char(CycleBuffer* buffer, char c) {
+    if (!buffer->empty && buffer->end == buffer->start) {
+        return false;
+    }
+
+    buffer->buffer[buffer->end++] = c;
+    buffer->end = buffer->end % BUFFER_SIZE;
+    buffer->empty = false;
+}
+
+static bool cyctle_buffer_take_char(CycleBuffer* buffer, char* out_c) {
+    assert(out_c);
+    if (buffer->empty) {
+        return false;
+    }
+
+    *out_c = buffer->buffer[buffer->start++];
+    buffer->start = buffer->start % BUFFER_SIZE;
+    if (buffer->start == buffer->end) {
+        buffer->empty = true;
+    }
+}
+
+static bool cyctle_buffer_is_empty(const CycleBuffer* buffer) {
+    return buffer->empty;
+}
 
 typedef struct SocketState {
   SOCKET socket;
   unsigned long long timeout_time;
 
-  enum SocketRecvState recv_state;
-  char recv_buffer[RECV_BUFFER_SIZE];
-  size_t recv_buffer_start;
-  size_t recv_buffer_end;
+  SocketRecvState recv_state;
+  CycleBuffer recv_buffer;
+  
+  SocketSendState send_state;
+  CycleBuffer send_buffer;
 
-  enum SocketSendState send_state;
-  char send_buffer[SEND_BUFFER_SIZE];
-  size_t send_buffer_start;
-  size_t send_buffer_end;
-
-  HttpRequsest http_request;
+  HttpRequest http_request;
   HttpResponse http_response;
 } SocketState;
 
-enum HttpRequestState {
-  HTTP_REQUEST_READING_HEADER,
-  HTTP_REQUEST_READING_BODY,
-  HTTP_REQUSET_DONE
-};
-
-typedef struct HttpRequest {
-  enum HttpRequstState state;
-
-  enum HttpMethod method;
-  HttpQuery *query;
-  HttpHeaders *headers;
-
-  SocketState *socket_state;
-} HttpRequest;
-
-enum HttpMethod req_get_method(const HttpRequest* req) {
+enum HttpMethod req_get_method(const HttpRequest *req) {
   assert(req && "req_get_method: req is null.");
-  assert(req->state != HTTP_REQUEST_READING_HEADER && "req_get_method: cannot accesse method bofore finished reading headers.");
+  assert(
+      req->state != HTTP_REQUEST_READING_HEADER &&
+      "req_get_method: cannot accesse method bofore finished reading headers.");
   return req->method;
 }
-const HttpQuery* req_get_query(const HttpRequest* req) {
+const HttpQuery *req_get_query(const HttpRequest *req) {
   assert(req && "req_get_query: req is null.");
-  assert(req->state != HTTP_REQUEST_READING_HEADER && "req_get_query: cannot accesse query bofore finished reading headers.");
+  assert(
+      req->state != HTTP_REQUEST_READING_HEADER &&
+      "req_get_query: cannot accesse query bofore finished reading headers.");
   return req->query;
 }
-const HttpHeaders* req_get_headers(const HttpRequest* req) {
+const HttpHeaders *req_get_headers(const HttpRequest *req) {
   assert(req && "req_get_headers: req is null.");
-  assert(req->state != HTTP_REQUEST_READING_HEADER && "req_get_headers: cannot accesse headers bofore finished reading headers.");
+  assert(req->state != HTTP_REQUEST_READING_HEADER &&
+         "req_get_headers: cannot accesse headers bofore finished reading "
+         "headers.");
   return req->headers;
 }
 
-bool req_can_read(const HttpRequest* req) {
-  assert(req && "req_can_read: req is null.");
-  assert(req->state != HTTP_REQUEST_READING_HEADER && "req_can_read: cannot accesse body bofore finished reading headers.");
-  assert(req->socket_state && "req_can_read: req has a null socket_state, something went wrong!");
+bool req_start_read(HttpRequest* req) {
+    assert(req && "req_can_read: req is null.");
+    assert(req->state != HTTP_REQUEST_READING_HEADER &&
+        "req_can_read: cannot accesse body bofore finished reading headers.");
+    assert(req->socket_state &&
+        "req_can_read: req has a null socket_state, something went wrong!");
 
-  const SocketState* socket_state = req->socket_state;
+    SocketState* socket_state = req->socket_state;
 
-  return socket_state->recv_buffer_start != socket_state->recv_buffer_end;
+    if (req->content_length > 0 && socket_state->recv_state != SOCKET_RECV_FINISHED) {
+        socket_state->recv_state = SOCKET_RECV_ACTIVE;
+        return true;
+    }
+
+    return false;
 }
-size_t req_read(HttpRequest* req, char* buffer, size_t length) {
+size_t req_read(HttpRequest *req, char *buffer, size_t length) {
   assert(req && "req_read: req is null.");
-  assert(req->state != HTTP_REQUEST_READING_HEADER && "req_read: cannot access body before finished reading headers.");
-  assert(req->socket_state && "req_read: req has a null socket_state, something went wrong!");
+  assert(req->state != HTTP_REQUEST_READING_HEADER &&
+         "req_read: cannot access body before finished reading headers.");
+  assert(req->socket_state &&
+         "req_read: req has a null socket_state, something went wrong!");
 
-  if(length == 0) {
+  if (length == 0) {
     return 0;
   }
 
-  SocketState* state = req->socket_state;
+  SocketState *state = req->socket_state;
 
   size_t chars_read_count = 0;
-  while(state->recv_buffer_start != state->recv_buffer_end) {
-    if(chars_read_count == length) {
+  while (!cyctle_buffer_is_empty(&state->recv_buffer)) {
+    if (chars_read_count == length) {
       break;
     }
 
-    buffer[chars_read_count++] = state->recv_buffer[state->recv_buffer_start++];
+    cyctle_buffer_take_char(&state->recv_buffer, &buffer[chars_read_count++]);
+  }
+
+  req->content_read += chars_read_count;
+
+  if (req->content_read == req->content_length) {
+      state->recv_state = SOCKET_RECV_FINISHED;
+      state->http_request.state = HTTP_REQUSET_DONE;
   }
 
   return chars_read_count;
 }
-
-
-enum HttpResponseState {
-  HTTP_RESPONSE_WRITING_STATUS_CODE,
-  HTTP_RESPONSE_WRITING_HEADERS,
-  HTTP_RESPONSE_WRITING_BODY,
-  HTTP_RESPONSE_DONE
-};
-
-struct HttpResponse {
-  enum HttpResponseState state;
-
-  enum HttpStatusCode http_status_code;
-  HttpHeaders* headers;
-  void *context;
-
-  SocketState* socket_state;
-};
-
-void res_set_status_code(HttpResponse *res,enum HttpStatusCode code) {
+void res_set_status_code(HttpResponse *res, enum HttpStatusCode code) {
   assert(res && "res_set_status_code: res is null");
-  assert(res->state == HTTP_RESPONSE_WRITING_STATUS_CODE && "res_set_status_code: response all ready set status code.");
+  assert(res->state == HTTP_RESPONSE_WRITING_STATUS_CODE &&
+         "res_set_status_code: response all ready set status code.");
+
+  SocketState *state = res->socket_state;
+  size_t used_space = cyctle_buffer_used_space(&state->send_buffer);
+  size_t free_space = BUFFER_SIZE - used_space;
+
+  char status_line[BUFFER_SIZE + 1];
+  size_t length = sprintf_s(status_line, BUFFER_SIZE, "HTTP/1.1 %d %s\r\n",
+                            code, http_status_reason_phrase(code));
+  assert(free_space > length && "there should be space for the status line...");
+
+  size_t chars_wrote_count = 0;
+  while (cyctle_buffer_has_space(&state->send_buffer)) {
+    if (chars_wrote_count == length) {
+      break;
+    }
+
+    cyctle_buffer_add_char(&state->send_buffer, status_line[chars_wrote_count++]);
+  }
 
   res->http_status_code = code;
   res->state = HTTP_RESPONSE_WRITING_HEADERS;
+  state->send_state = SOCKET_SEND_ACTIVE;
 }
-HttpHeaders* res_get_headers(const HttpResponse* res) {
+HttpHeaders *res_get_headers(const HttpResponse *res) {
   assert(res && "res_get_headers: res is null");
-  assert(res->state & (HTTP_RESPONSE_WRITING_STATUS_CODE | HTTP_RESPONSE_WRITING_HEADERS) && "res_get_headers: response all ready finished writing headers.");
+  assert(res->state & (HTTP_RESPONSE_WRITING_STATUS_CODE |
+                       HTTP_RESPONSE_WRITING_HEADERS) &&
+         "res_get_headers: response all ready finished writing headers.");
   assert(res->headers && "res_get_headers: response headers is null");
 
   return res->headers;
 }
-void res_finish_headers(HttpResponse* res) {
+void res_finish_headers(HttpResponse *res) {
   assert(res && "res_finish_headers: res is null");
-  assert(res->state & HTTP_RESPONSE_WRITING_HEADERS && "res_finish_headers: response status doesn't allow to finish headers. Did you forgot to set status code? or did you all ready finished headers?");
+  assert(res->state & HTTP_RESPONSE_WRITING_HEADERS &&
+         "res_finish_headers: response status doesn't allow to finish headers. "
+         "Did you forgot to set status code? or did you all ready finished "
+         "headers?");
 
   res->state = HTTP_RESPONSE_WRITING_BODY;
+  res->headers_send_state = SOCKET_SEND_ACTIVE;
 }
-void res_finish_write(HttpResponse* res) {
+void res_finish_write(HttpResponse *res) {
   assert(res && "res_finish_write: res is null");
-  assert(res->state & HTTP_RESPONSE_WRITING_BODY && "res_finish_headers request");
+  assert(res->state & HTTP_RESPONSE_WRITING_BODY &&
+         "res_finish_headers request");
 
   res->state = HTTP_RESPONSE_DONE;
 }
-void res_set_context(HttpResponse* res, const void* context) {
+void res_set_context(HttpResponse *res, void *context) {
   assert(res && "res_set_context: res is null");
 
   res->context = context;
 }
-void* res_get_context(const HttpResponse* res) {
+void *res_get_context(const HttpResponse *res) {
   assert(res && "res_get_context: res is null");
 
   return res->context;
 }
 
-bool res_can_write(const HttpResponse* res) {
+bool res_can_write(const HttpResponse *res) {
   assert(res && "res_can_write: res is null.");
-  assert(res->state == HTTP_RESPONSE_WRITING_BODY && "res_can_write: cannot write body bofore finishing writing headers.");
-  assert(res->socket_state && "res_can_write: res has a null socket_state, something went wrong!");
+  assert(res->socket_state &&
+         "res_can_write: res has a null socket_state, something went wrong!");
 
-  const SocketState* socket_state = req->socket_state;
+  if (res->state != HTTP_RESPONSE_WRITING_BODY) {
+    return false;
+  }
 
-  return socket_state->recv_buffer_start != socket_state->recv_buffer_end;
+  const SocketState *socket_state = res->socket_state;
+
+  return cyctle_buffer_has_space(&socket_state->send_buffer);
 }
-size_t res_wirte(HttpResponse* res, const char* buffer, size_t length) {
+size_t res_wirte(HttpResponse *res, const char *buffer, size_t length) {
   assert(res && "res_write: res is null.");
-  assert(res->state == HTTP_RESPONSE_WRITING_BODY && "res_write: cannot write body before finishing writing headers.");
-  assert(res->socket_state && "res_write: res has a null socket_state, something went wrong!");
+  assert(res->socket_state &&
+         "res_write: res has a null socket_state, something went wrong!");
 
-  if(length == 0) {
+  res->socket_state->send_state = SOCKET_SEND_ACTIVE;
+  if (length == 0) {
     return 0;
   }
 
-  SocketState* state = req->socket_state;
+  if (res->state != HTTP_RESPONSE_WRITING_BODY) {
+    return 0;
+  }
+
+  SocketState *state = res->socket_state;
 
   size_t chars_wrote_count = 0;
-  while(state->recv_buffer_start != state->recv_buffer_end) {
-    if(chars_wrote_count == length) {
+  while (cyctle_buffer_has_space(&state->send_buffer)) {
+    if (chars_wrote_count == length) {
       break;
     }
 
-    state->recv_buffer[state->send_buffer_end++] = buffer[chars_wrote_count++];
+    cyctle_buffer_add_char(&state->send_buffer, buffer[chars_wrote_count++]);
   }
 
   return chars_wrote_count;
 }
 
+
+
 typedef struct WebServer {
   SocketState socket_states[MAX_CONNECTIONS];
+
 } WebServer;
+
+static void accept_connection(WebServer *server, SOCKET listen_socket);
+static bool add_connection(WebServer *server, SOCKET socket_to_connect);
+static void remove_connection(WebServer *server, size_t index);
+static void receive_data(SocketState *socket_state);
+static void send_data(SocketState *socket_state);
+static unsigned long long get_currect_time_stamp();
+static void parse_request_header(SocketState *socket_state);
+static void fill_send_with_headers(SocketState *socket_state);
 
 int web_server_run(WebServer *server) {
   WSAData wsa_data;
@@ -220,12 +369,18 @@ int web_server_run(WebServer *server) {
 
   sockaddr_in server_service;
   server_service.sin_family = AF_INET;
-  server_service.sin_addr.s_addr = "127.0.0.1";
+  if (!inet_pton(AF_INET, "127.0.0.1", &server_service.sin_addr.s_addr)) {
+    printf("Server: Error at converting string ip to number: %d\n",
+           WSAGetLastError());
+    closesocket(listen_socket);
+    WSACleanup();
+    return 1;
+  }
   // server_service.sin_addr.s_addr = INADDR_ANY;
   server_service.sin_port = htons(SERVER_PORT);
 
-  if (SOCKET_ERROR ==
-      bind(listen_socket, (SOCKADDR *)&server_service, sizeof(server_service))) {
+  if (SOCKET_ERROR == bind(listen_socket, (SOCKADDR *)&server_service,
+                           sizeof(server_service))) {
     printf("Server: Error at bind(): %d\n", WSAGetLastError());
     closesocket(listen_socket);
     WSACleanup();
@@ -239,58 +394,790 @@ int web_server_run(WebServer *server) {
     return 1;
   }
 
-  printf("Server: listening on %s:%d\n", "127.0.0.1", SERVER_PORT);
+  char address_buff[16];
+  inet_ntop(AF_INET, &server_service.sin_addr.s_addr, address_buff, 16);
+  printf("Server: listening on %s:%d\n", address_buff, SERVER_PORT);
   fd_set wait_recv;
   fd_set wait_send;
 
+  SocketState *sockets = server->socket_states;
+
   while (true) {
+    unsigned long long current_time = get_currect_time_stamp();
     FD_ZERO(&wait_recv);
     FD_ZERO(&wait_send);
 
-
-
-    for (int i = 0; i < MAX_SOCKETS; i++) {
-      if ((sockets[i].recv == LISTEN) || (sockets[i].recv == RECEIVE))
-        FD_SET(sockets[i].id, &waitRecv);
-      if (sockets[i].send == SEND)
-        FD_SET(sockets[i].id, &waitSend);
+    FD_SET(listen_socket, &wait_recv);
+    for (int i = 0; i < MAX_CONNECTIONS; i++) {
+        if (sockets[i].socket == 0) {
+            continue;
+        }
+      if (sockets[i].recv_state == SOCKET_RECV_ACTIVE)
+        FD_SET(sockets[i].socket, &wait_recv);
+      if (sockets[i].send_state == SOCKET_SEND_ACTIVE)
+        FD_SET(sockets[i].socket, &wait_send);
     }
 
-    int nfd;
-    nfd = select(0, &waitRecv, &waitSend, NULL, NULL);
+    int nfd = select(0, &wait_recv, &wait_send, NULL, NULL);
     if (nfd == SOCKET_ERROR) {
+      // TODO: proper cleanup!
       printf("Server: Error at select(): %d\n", WSAGetLastError());
       WSACleanup();
       return 1;
     }
 
-    for (int i = 0; i < MAX_SOCKETS && nfd > 0; i++) {
-      if (FD_ISSET(sockets[i].id, &waitRecv)) {
+    if (FD_ISSET(listen_socket, &wait_recv)) {
+      accept_connection(server, listen_socket);
+      nfd--;
+    }
+
+    for (size_t i = 0; i < MAX_CONNECTIONS && nfd > 0; i++) {
+      if (!sockets[i].socket) {
+        continue;
+      }
+
+      // read data
+      if (FD_ISSET(sockets[i].socket, &wait_recv)) {
         nfd--;
-        switch (sockets[i].recv) {
-        case LISTEN:
-          acceptConnection(i);
-          break;
-        case RECEIVE:
-          receiveRequest(i);
-          break;
+        if (sockets[i].recv_state == SOCKET_RECV_ACTIVE) {
+          receive_data(&sockets[i]);
         }
       }
-      if (FD_ISSET(sockets[i].id, &waitSend)) {
+
+      // handling states
+      if (sockets[i].http_request.state == HTTP_REQUEST_READING_HEADER) {
+        parse_request_header(&sockets[i]);
+      }
+
+
+
+      // fill send buffer with headers
+      if (sockets[i].http_response.headers_send_state == SOCKET_SEND_ACTIVE) {
+        fill_send_with_headers(&sockets[i]);
+      }
+
+      // send data
+      if (FD_ISSET(sockets[i].socket, &wait_send)) {
         nfd--;
-        switch (sockets[i].send) {
-        case SEND:
-          sendResponse(i);
-          break;
+        if (sockets[i].send_state == SOCKET_SEND_ACTIVE) {
+          send_data(&sockets[i]);
+        }
+      }
+
+      // if done sending close connection
+      if (sockets[i].http_response.state == HTTP_RESPONSE_DONE &&
+          sockets[i].send_state != SOCKET_SEND_ACTIVE) {
+        remove_connection(server, i);
+      }
+      
+      // if time out remove connection
+      //if (sockets[i].timeout_time < current_time){
+      //  remove_connection(server, i);
+      //}
+    }
+  }
+
+  for (size_t i = 0; i < MAX_CONNECTIONS; i++) {
+    if (sockets[i].socket) {
+      closesocket(sockets[i].socket);
+      sockets[i].socket = 0;
+    }
+  }
+
+  printf("Server: Closing Connection.\n");
+  closesocket(listen_socket);
+  WSACleanup();
+
+  return 0;
+}
+
+static void accept_connection(WebServer *server, SOCKET listen_socket) {
+  struct sockaddr_in from;
+  int from_size = sizeof(from);
+
+  SOCKET msg_socket =
+      accept(listen_socket, (struct sockaddr *)&from, &from_size);
+  if (INVALID_SOCKET == msg_socket) {
+    printf("Server: Error at accept(): %d\n", WSAGetLastError());
+    return;
+  }
+
+  char ipv4[16];
+  printf("Server: Client %s:%d is connected.\n",
+         inet_ntop(AF_INET, &from.sin_addr, ipv4, 16), ntohs(from.sin_port));
+
+  unsigned long flag = 1;
+  if (ioctlsocket(msg_socket, FIONBIO, &flag) != 0) {
+    printf("Server: Error at ioctlsocket(): %d\n", WSAGetLastError());
+    closesocket(msg_socket);
+    return;
+  }
+
+  if (add_connection(server, msg_socket) == false) {
+    printf("\t\tToo many connections, dropped!\n");
+    closesocket(msg_socket);
+  }
+}
+
+static bool add_connection(WebServer *server, SOCKET connection_socket) {
+  assert(server && "add_connection: server is null.");
+  assert(connection_socket != 0 && "add_connection: connection_socket is 0.");
+
+  for (size_t i = 0; i < MAX_CONNECTIONS; i++) {
+    if (!server->socket_states[i].socket) {
+      SocketState *state = &server->socket_states[i];
+
+      state->socket = connection_socket;
+
+      state->recv_state = SOCKET_RECV_ACTIVE;
+      state->recv_buffer.start = 0;
+      state->recv_buffer.end = 0;
+      state->recv_buffer.empty = true;
+      state->send_state = SOCKET_SEND_IDLE;
+      state->send_buffer.start = 0;
+      state->send_buffer.end = 0;
+      state->send_buffer.empty = true;
+
+      state->http_request.state = HTTP_REQUEST_READING_HEADER;
+      state->http_request.route = NULL;
+      state->http_request.query = create_http_query();
+      state->http_request.headers = create_http_headers();
+      state->http_request.content_length = 0;
+      state->http_request.content_read = 0;
+      state->http_request.context.step = HTTP_REQUEST_PRASING_METHOD;
+      state->http_request.context.method = NULL;
+      state->http_request.context.request_target = NULL;
+      state->http_request.context.version = NULL;
+      state->http_request.context.field_lines = NULL;
+      state->http_request.socket_state = state;
+
+      state->http_response.state = HTTP_RESPONSE_WRITING_STATUS_CODE;
+      state->http_response.headers_send_state = SOCKET_SEND_IDLE;
+      state->http_response.headers = NULL;
+      state->http_response.write_headers_index[0] = 0;
+      state->http_response.write_headers_index[1] = 0;
+      state->http_response.write_headers_index[2] = 0;
+      state->http_response.context = NULL;
+      state->http_response.socket_state = state;
+
+      state->timeout_time =
+          get_currect_time_stamp() + (TIME_OUT_IN_SEC * 1000000000ull);
+      return true;
+    }
+  }
+  return false;
+}
+
+static void remove_connection(WebServer *server, size_t index) {
+  assert(server && "remove_connection: server is null.");
+  assert(index < MAX_CONNECTIONS &&
+         "remove_connection: index is larger then MAX_CONNECTION.");
+  assert(server->socket_states[index].socket != 0 &&
+         "remove_connection: no connection in this index.");
+
+  SocketState *state = &server->socket_states[index];
+
+  closesocket(state->socket);
+  state->socket = 0;
+
+  state->recv_state = 0;
+  state->recv_buffer.start = 0;
+  state->recv_buffer.end = 0;
+  state->recv_buffer.empty = true;
+  state->send_state = 0;
+  state->send_buffer.start = 0;
+  state->send_buffer.end = 0;
+  state->send_buffer.empty = true;
+
+  state->http_request.state = 0;
+
+  free(state->http_request.route);
+  state->http_request.route = NULL;
+
+  destroy_http_query(state->http_request.query);
+  state->http_request.query = NULL;
+
+  destroy_http_headers(state->http_request.headers);
+  state->http_request.headers = NULL;
+
+  state->http_request.content_length = 0;
+  state->http_request.content_read = 0;
+
+  state->http_request.context.step = 0;
+
+  free(state->http_request.context.method);
+  state->http_request.context.method = NULL;
+
+  free(state->http_request.context.request_target);
+  state->http_request.context.request_target = NULL;
+
+  free(state->http_request.context.version);
+  state->http_request.context.version = NULL;
+
+  free(state->http_request.context.field_lines);
+  state->http_request.context.field_lines = NULL;
+  state->http_request.socket_state = NULL;
+
+  state->http_response.state = 0;
+
+  state->http_response.headers_send_state = 0;
+  state->http_response.write_headers_index[0] = 0;
+  state->http_response.write_headers_index[1] = 0;
+  state->http_response.write_headers_index[2] = 0;
+  destroy_http_headers(state->http_response.headers);
+  state->http_response.headers = NULL;
+
+  state->http_response.socket_state = NULL;
+
+  state->timeout_time = 0;
+}
+
+static unsigned long long get_currect_time_stamp() {
+  FILETIME curr;
+  GetSystemTimePreciseAsFileTime(&curr);
+  ULARGE_INTEGER curr_ull = {.u.HighPart = curr.dwHighDateTime,
+                             .u.LowPart = curr.dwLowDateTime};
+  return curr_ull.QuadPart;
+}
+
+static void receive_data(SocketState *socket_state) {
+  assert(socket_state && "recive_data: socket_state is null.");
+  assert(socket_state->socket != 0 &&
+         "recive_data: socket of socket_state is 0.");
+
+  SOCKET msg_socket = socket_state->socket;
+  size_t used_space = cyctle_buffer_used_space(&socket_state->recv_buffer);
+  size_t free_space = BUFFER_SIZE - used_space;
+  if (free_space == 0) {
+    return;
+  }
+
+  char temp_buffer[BUFFER_SIZE];
+  size_t bytes_recv = recv(msg_socket, temp_buffer, (int)free_space, 0);
+
+  if (SOCKET_ERROR == bytes_recv) {
+    printf("Server: Error at recv(): %d\n", WSAGetLastError());
+    socket_state->send_state = SOCKET_SEND_FINISHED;
+    socket_state->http_response.state = HTTP_RESPONSE_DONE;
+    return;
+  }
+
+  if (bytes_recv == 0) {
+    printf("Server: Error at recv(), read 0 bytes: %d\n", WSAGetLastError());
+    socket_state->send_state = SOCKET_SEND_FINISHED;
+    socket_state->http_response.state = HTTP_RESPONSE_DONE;
+    return;
+  }
+
+  for (size_t i = 0; i < bytes_recv; i++) {
+      cyctle_buffer_add_char(&socket_state->recv_buffer, temp_buffer[i]);
+  }
+}
+
+static void send_data(SocketState *socket_state) {
+  assert(socket_state && "send_data: socket_state is null.");
+  assert(socket_state->socket != 0 &&
+         "send_data: socket of socket_state is 0.");
+
+  SOCKET msg_socket = socket_state->socket;
+  size_t used_space = cyctle_buffer_used_space(&socket_state->send_buffer);
+  if (used_space == 0) {
+    socket_state->send_state = SOCKET_SEND_IDLE;
+    return;
+  }
+
+  char temp_buffer[BUFFER_SIZE];
+  for (size_t i = 0; i < used_space; i++) {
+      cyctle_buffer_take_char(&socket_state->send_buffer, &temp_buffer[i]);
+  }
+
+  size_t bytes_sent = send(msg_socket, temp_buffer, sizeof(temp_buffer), 0);
+  if (SOCKET_ERROR == bytes_sent) {
+    printf("Server: Error at send(): %d\n", WSAGetLastError());
+    socket_state->send_state = SOCKET_SEND_FINISHED;
+    socket_state->http_response.state = HTTP_RESPONSE_DONE;
+    return;
+  }
+
+  if (bytes_sent == 0) {
+    printf("Server: Error at sent(), sent 0 bytes: %d\n", WSAGetLastError());
+    socket_state->send_state = SOCKET_SEND_FINISHED;
+    socket_state->http_response.state = HTTP_RESPONSE_DONE;
+    return;
+  }
+
+  if (bytes_sent == used_space) {
+    socket_state->send_state = SOCKET_SEND_IDLE;
+  }
+}
+
+static void fill_send_with_headers(SocketState *socket_state) {
+    size_t used_space = cyctle_buffer_used_space(&socket_state->send_buffer);
+  size_t free_space = BUFFER_SIZE - used_space;
+  if (free_space == 0) {
+    return;
+  }
+
+  if (socket_state->http_response.state != HTTP_RESPONSE_WRITING_BODY) {
+    return;
+  }
+
+  if (socket_state->http_response.headers_send_state != SOCKET_SEND_ACTIVE) {
+    return;
+  }
+
+  HttpHeaders *headers = socket_state->http_response.headers;
+  size_t total_count = headers_count(headers);
+  size_t headers_index = socket_state->http_response.write_headers_index[0];
+  bool is_value = socket_state->http_response.write_headers_index[1];
+  size_t word_index = socket_state->http_response.write_headers_index[2];
+  while (free_space > 0) {
+    if (headers_index == total_count) {
+      break;
+    }
+
+    const char *word = is_value
+                           ? headers_get_value_at_index(headers, headers_index)
+                           : headers_get_key_at_index(headers, headers_index);
+    size_t word_len = strlen(word);
+    for (; word_index < word_len && free_space > 0; word_index++) {
+        cyctle_buffer_add_char(&socket_state->send_buffer, word[word_index]);
+      free_space--;
+    }
+
+    if (word_index == word_len) {
+      if (is_value) {
+        is_value = 0;
+        headers_index++;
+        word_index = 0;
+      } else {
+        if (free_space > 1) {
+            cyctle_buffer_add_char(&socket_state->send_buffer, ':');
+            cyctle_buffer_add_char(&socket_state->send_buffer, ' ');
+          free_space = free_space - 2;
+          is_value = 1;
+          word_index = 0;
         }
       }
     }
   }
 
-  printf("Server: Closing Connection.\n");
-  closesocket(listenSocket);
-  WSACleanup();
+  socket_state->http_response.write_headers_index[0] = headers_index;
+  socket_state->http_response.write_headers_index[1] = is_value;
+  socket_state->http_response.write_headers_index[2] = word_index;
 
-  return 0;
-  return 0;
+  if (headers_index == total_count) {
+    socket_state->http_response.headers_send_state = SOCKET_SEND_FINISHED;
+  }
+}
+
+static void set_response_server_error(SocketState *socket_state) {
+  assert(socket_state && "parse_method_header: socket_state is null.");
+
+  res_set_status_code(&socket_state->http_response, HTTP_STATUS_SERVER_ERROR);
+  headers_add(socket_state->http_response.headers, "Content-Type",
+              "text/html; charset=UTF-8");
+  headers_add(socket_state->http_response.headers, "Content-Length", "0");
+  res_finish_headers(&socket_state->http_response);
+  res_finish_write(&socket_state->http_response);
+}
+
+static void set_response_bad_request(SocketState *socket_state) {
+  assert(socket_state && "parse_method_header: socket_state is null.");
+
+  res_set_status_code(&socket_state->http_response, HTTP_STATUS_BAD_REQUEST);
+  headers_add(socket_state->http_response.headers, "Content-Type",
+              "text/html; charset=UTF-8");
+  headers_add(socket_state->http_response.headers, "Content-Length", "0");
+  res_finish_headers(&socket_state->http_response);
+  res_finish_write(&socket_state->http_response);
+}
+
+static void set_response_not_found(SocketState *socket_state) {
+  assert(socket_state && "parse_method_header: socket_state is null.");
+
+  res_set_status_code(&socket_state->http_response, HTTP_STATUS_NOT_FOUND);
+  headers_add(socket_state->http_response.headers, "Content-Type",
+              "text/html; charset=UTF-8");
+  headers_add(socket_state->http_response.headers, "Content-Length", "0");
+  res_finish_headers(&socket_state->http_response);
+  res_finish_write(&socket_state->http_response);
+}
+
+static void set_response_version_not_supported(SocketState *socket_state) {
+  assert(socket_state &&
+         "set_response_version_not_supported: socket_state is null.");
+
+  res_set_status_code(&socket_state->http_response,
+                      HTTP_STATUS_HTTP_VERSION_NOT_SUPPORTED);
+  headers_add(socket_state->http_response.headers, "Content-Type",
+              "text/html; charset=UTF-8");
+  headers_add(socket_state->http_response.headers, "Content-Length", "0");
+  res_finish_headers(&socket_state->http_response);
+  res_finish_write(&socket_state->http_response);
+}
+
+static void parse_method(SocketState *socket_state) {
+  assert(socket_state && "parse_method_header: socket_state is null.");
+
+  HttpRequestParsingContext *context = &socket_state->http_request.context;
+
+  if (context->method == NULL) {
+    context->method = malloc(sizeof(char) * 1);
+    if (context->method == NULL) {
+      set_response_server_error(socket_state);
+      return;
+    }
+    context->method[0] = 0;
+  }
+
+  size_t used_space = cyctle_buffer_used_space(&socket_state->recv_buffer);
+
+  char temp_buffer[BUFFER_SIZE + 1];
+  size_t chars_read;
+  bool hit_space = false;
+  for (chars_read = 0; chars_read < used_space;) {
+      char c;
+      cyctle_buffer_take_char(&socket_state->recv_buffer, &c);
+    if (c == ' ') {
+      hit_space = true;
+      break;
+    }
+    temp_buffer[chars_read++] = c;
+  }
+
+  size_t current_len = strlen(context->method);
+  if ((chars_read + current_len) > MAX_HTTP_METHOD_LENGTH) {
+    set_response_bad_request(socket_state);
+    return;
+  }
+
+  size_t new_size = (current_len + chars_read + 1);
+  char *temp = realloc(context->method, sizeof(char) * new_size);
+  if (temp == NULL) {
+    set_response_server_error(socket_state);
+    return;
+  }
+  for (size_t i = 0; current_len < new_size - 1;) {
+    temp[current_len++] = temp_buffer[i++];
+  }
+  temp[current_len] = 0;
+  context->method = temp;
+
+  if (!hit_space) {
+    return;
+  }
+
+  for (int i = 0; i < HTTP_METHOD_LENGTH; i++) {
+    const char *method_name = http_method_name(i);
+    if (strcmp(method_name, context->method) == 0) {
+      context->step = HTTP_REQUEST_PARSING_REQUEST_TARGET;
+      socket_state->http_request.method = i;
+      return;
+    }
+  }
+
+  set_response_bad_request(socket_state);
+}
+
+static void parse_request_target(SocketState *socket_state) {
+  assert(socket_state && "parse_request_target: socket_state is null.");
+
+  HttpRequestParsingContext *context = &socket_state->http_request.context;
+
+  if (context->request_target == NULL) {
+    context->request_target = malloc(sizeof(char) * 1);
+    if (context->request_target == NULL) {
+      set_response_server_error(socket_state);
+      return;
+    }
+    context->request_target[0] = 0;
+  }
+
+  size_t used_space = cyctle_buffer_used_space(&socket_state->recv_buffer);
+
+  char temp_buffer[BUFFER_SIZE + 1];
+  size_t chars_read;
+  bool hit_space = false;
+  for (chars_read = 0; chars_read < used_space;) {
+      char c;
+      cyctle_buffer_take_char(&socket_state->recv_buffer, &c);
+    if (c == ' ') {
+      hit_space = true;
+      break;
+    }
+    temp_buffer[chars_read++] = c;
+  }
+
+  size_t current_len = strlen(context->request_target);
+  size_t new_len = (current_len + chars_read + 1);
+  char *temp = realloc(context->request_target, sizeof(char) * new_len);
+  if (temp == NULL) {
+    set_response_server_error(socket_state);
+    return;
+  }
+  for (size_t i = 0; current_len < new_len - 1;) {
+    temp[current_len++] = temp_buffer[i++];
+  }
+  temp[current_len] = 0;
+  context->request_target = temp;
+
+  if (!hit_space) {
+    return;
+  }
+
+  char *q_mark = strchr(context->request_target, '?');
+  if (q_mark != NULL) {
+    q_mark[0] = 0;
+    char *key = q_mark + 1;
+
+    while (1) {
+      char *eq_mark = strchr(key, '=');
+      if (eq_mark == NULL) {
+        break;
+      }
+      eq_mark[0] = 0;
+      char *value = eq_mark + 1;
+      char *and_mark = strchr(value, '&');
+      if (and_mark != NULL) {
+        and_mark[0] = 0;
+      }
+
+      if (!query_add(socket_state->http_request.query, key, value)) {
+        // TODO: do something?
+      }
+
+      if (and_mark == NULL) {
+        break;
+      } else {
+        key = and_mark + 1;
+      }
+    }
+  }
+
+  socket_state->http_request.route = context->request_target;
+  // TODO: do proper validation on route
+  context->step = HTTP_REQUEST_PARSING_REQUEST_VERSION;
+}
+static void parse_request_version(SocketState *socket_state) {
+  assert(socket_state && "parse_method_header: socket_state is null.");
+
+  HttpRequestParsingContext *context = &socket_state->http_request.context;
+
+  if (context->version == NULL) {
+    context->version = malloc(sizeof(char) * 1);
+    if (context->version == NULL) {
+      set_response_server_error(socket_state);
+      return;
+    }
+    context->version[0] = 0;
+  }
+
+  size_t used_space = cyctle_buffer_used_space(&socket_state->recv_buffer);
+
+  char temp_buffer[BUFFER_SIZE + 1];
+  size_t chars_read;
+  bool hit_lf = false;
+  for (chars_read = 0; chars_read < used_space;) {
+      char c;
+      cyctle_buffer_take_char(&socket_state->recv_buffer, &c);
+    if (c == '\n') {
+      hit_lf = true;
+      break;
+    }
+
+    temp_buffer[chars_read++] = c;
+  }
+  temp_buffer[chars_read] = 0;
+
+  size_t current_len = strlen(context->version);
+  if ((chars_read + current_len - 1) > 9) {
+    set_response_bad_request(socket_state);
+    return;
+  }
+
+  size_t new_size = (current_len + chars_read + 1);
+  char *temp = realloc(context->version, sizeof(char) * new_size);
+  if (temp == NULL) {
+    set_response_server_error(socket_state);
+    return;
+  }
+  for (size_t i = 0; current_len < new_size - 1;) {
+    temp[current_len++] = temp_buffer[i++];
+  }
+  temp[current_len] = 0;
+  context->version = temp;
+
+  if (!hit_lf) {
+    return;
+  }
+
+  for (int i = 0; i < HTTP_METHOD_LENGTH; i++) {
+    if (strcmp("HTTP/1.1\r", context->version) == 0) {
+      context->step = HTTP_REQUEST_PARSING_FIELD_LINES;
+      return;
+    }
+  }
+
+  set_response_version_not_supported(socket_state);
+}
+static void parse_request_field_liens(SocketState *socket_state) {
+  assert(socket_state);
+
+  HttpRequestParsingContext *context = &socket_state->http_request.context;
+
+  if (context->field_lines == NULL) {
+    context->field_lines = malloc(sizeof(char) * 1);
+    if (context->field_lines == NULL) {
+      set_response_server_error(socket_state);
+      return;
+    }
+    context->field_lines[0] = 0;
+  }
+
+  while (!cyctle_buffer_is_empty(&socket_state->recv_buffer))
+  {
+      size_t used_space = cyctle_buffer_used_space(&socket_state->recv_buffer);
+
+      char temp_buffer[BUFFER_SIZE + 1];
+      size_t chars_read;
+      bool hit_lf = false;
+      for (chars_read = 0; chars_read < used_space;) {
+          char c;
+          cyctle_buffer_take_char(&socket_state->recv_buffer, &c);
+          if (c == '\n') {
+              hit_lf = true;
+              break;
+          }
+          temp_buffer[chars_read++] = c;
+      }
+
+      size_t current_len = strlen(context->field_lines);
+      size_t new_size = (current_len + chars_read + 1);
+      char* temp = realloc(context->field_lines, sizeof(char) * new_size);
+      if (temp == NULL) {
+          set_response_server_error(socket_state);
+          return;
+      }
+      for (size_t i = 0; current_len < new_size - 1;) {
+          temp[current_len++] = temp_buffer[i++];
+      }
+      temp[current_len] = 0;
+      context->field_lines = temp;
+
+      if (!hit_lf) {
+          return;
+      }
+
+      if (context->field_lines[current_len - 1] != '\r') {
+          set_response_bad_request(socket_state);
+          return;
+      }
+
+      if (context->field_lines[current_len - 2] != '\r') {
+          continue;
+      }
+
+      // finished reading headers
+      context->field_lines[current_len - 2] = 0;
+      current_len = current_len - 2;
+
+      char* key = context->field_lines;
+      while (key[0] != 0) {
+          char* cul_mark = strchr(key, ':');
+          if (cul_mark == NULL) {
+              set_response_bad_request(socket_state);
+              return;
+          }
+          cul_mark[0] = 0;
+          char* key_temp = key;
+          for (size_t i = 0; key[i] != 0; i++) {
+              if (key[i] == ' ' || key[i] == '\t') {
+                  set_response_bad_request(socket_state);
+                  return;
+              }
+          }
+
+          char* value = cul_mark + 1;
+          char* cr_mark = strchr(value, '\r');
+          if (cr_mark != NULL) {
+              cr_mark[0] = 0; 
+          }
+
+          while (value[0] == ' ' || value[0] == '\t') {
+              value = value + 1;
+          }
+
+          size_t value_len = strlen(value);
+          for (size_t i = value_len; i >= 0; i--) {
+              if (value[i] != ' ' && value[i] != '\t') {
+                  break;
+              }
+
+              value[i] = 0;
+          }
+
+          if (!headers_add(socket_state->http_request.headers, key, value)) {
+              // TODO: do something?
+          }
+
+          if (cr_mark == NULL) {
+              break;
+          }
+          else {
+              key = cr_mark + 1;
+          }
+      }
+
+      context->step = HTTP_REQUEST_PARSING_DONE;
+      return;
+  }
+}
+
+static void parse_request_header(SocketState *socket_state) {
+  assert(socket_state && "parse_request_header: socket_state is null.");
+  HttpRequestParsingContext *context = &socket_state->http_request.context;
+
+  if (context->step == HTTP_REQUEST_PRASING_METHOD &&
+      socket_state->http_response.state != HTTP_RESPONSE_DONE) {
+    parse_method(socket_state);
+  }
+
+  if (context->step == HTTP_REQUEST_PARSING_REQUEST_TARGET &&
+      socket_state->http_response.state != HTTP_RESPONSE_DONE) {
+    parse_request_target(socket_state);
+  }
+
+  if (context->step == HTTP_REQUEST_PARSING_REQUEST_VERSION &&
+      socket_state->http_response.state != HTTP_RESPONSE_DONE) {
+    parse_request_version(socket_state);
+  }
+
+  if (context->step == HTTP_REQUEST_PARSING_FIELD_LINES &&
+      socket_state->http_response.state != HTTP_RESPONSE_DONE) {
+    parse_request_field_liens(socket_state);
+  }
+
+  if (context->step == HTTP_REQUEST_PARSING_DONE &&
+      socket_state->http_response.state != HTTP_RESPONSE_DONE) {
+      const char* content_length = headers_get(socket_state->http_request.headers, "Content-Length");
+      if (content_length != NULL) {
+          int length = atoi(content_length);
+          if (length > 0) {
+            socket_state->http_request.state = HTTP_REQUEST_READING_BODY;
+            socket_state->recv_state = SOCKET_RECV_IDLE;
+            socket_state->http_request.content_length = content_length;
+            return;
+          }
+      }
+
+      socket_state->http_request.state = HTTP_REQUSET_DONE;
+      socket_state->recv_state = SOCKET_RECV_FINISHED;
+  }
+}
+
+
+int main() {
+    WebServer server = { 0 };
+  return web_server_run(&server);
 }
