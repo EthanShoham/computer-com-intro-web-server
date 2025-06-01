@@ -846,17 +846,6 @@ static void set_response_bad_request(SocketState *socket_state) {
   res_finish_write(&socket_state->http_response);
 }
 
-static void set_response_not_found(SocketState *socket_state) {
-  assert(socket_state && "parse_method_header: socket_state is null.");
-
-  res_set_status_code(&socket_state->http_response, HTTP_STATUS_NOT_FOUND);
-  headers_add(socket_state->http_response.headers, "Content-Type",
-              "text/html; charset=UTF-8");
-  headers_add(socket_state->http_response.headers, "Content-Length", "0");
-  res_finish_headers(&socket_state->http_response);
-  res_finish_write(&socket_state->http_response);
-}
-
 static void set_response_version_not_supported(SocketState *socket_state) {
   assert(socket_state &&
          "set_response_version_not_supported: socket_state is null.");
@@ -1171,7 +1160,6 @@ static void parse_request_field_liens(SocketState *socket_state) {
         return;
       }
       cul_mark[0] = 0;
-      char *key_temp = key;
       for (size_t i = 0; key[i] != 0; i++) {
         if (key[i] == ' ' || key[i] == '\t') {
           set_response_bad_request(socket_state);

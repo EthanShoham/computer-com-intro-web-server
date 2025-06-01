@@ -121,6 +121,7 @@ void root(HttpRequest *req, HttpResponse *res) {
     char cnt_len[255];
     snprintf(cnt_len, sizeof(cnt_len), "%zu", context->content_length);
     headers_add(headers, "Content-Length", cnt_len);
+    headers_add(headers, "Content-Language", lan);
     res_finish_headers(res);
   }
 
