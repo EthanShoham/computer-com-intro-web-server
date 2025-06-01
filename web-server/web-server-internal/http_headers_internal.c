@@ -120,4 +120,4 @@ const char *headers_get_value_at_index(HttpHeaders *headers, size_t index) {
 
   return headers->headers[index].value;
 }
-size_t headers_count(HttpHeaders *headers) { return headers->length; }
+size_t headers_count(const HttpHeaders *headers) { return headers->length; }

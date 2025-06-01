@@ -7,6 +7,6 @@ typedef struct HttpHeaders HttpHeaders;
 
 const char *headers_get(const HttpHeaders *headers, const char *key);
 bool headers_add(HttpHeaders *headers, const char *key, const char *value);
-size_t headers_count(HttpHeaders *headers);
+size_t headers_count(const HttpHeaders *headers);
 
 #endif // !HTTP_HEADERS
