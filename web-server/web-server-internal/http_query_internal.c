@@ -1,8 +1,8 @@
+#include "http_query_internal.h"
+#include "key_value_pair.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
-#include "http_query_internal.h"
-#include "key_value_pair.h"
 
 // list of key value pairs extracted from the url
 typedef struct HttpQuery {
@@ -12,19 +12,19 @@ typedef struct HttpQuery {
 } HttpQuery;
 
 // the key is case sensetive, returns null if key not found,
-HttpQuery* create_http_query() {
+HttpQuery *create_http_query() {
   HttpQuery *query = malloc(sizeof(HttpQuery));
-  if(query == NULL) {
+  if (query == NULL) {
     return NULL;
   }
 
   query->length = 0;
   query->capacity = 0;
   query->params = NULL;
-  return  query;
+  return query;
 }
-void destroy_http_query(HttpQuery* query) {
-  if(query == NULL) {
+void destroy_http_query(HttpQuery *query) {
+  if (query == NULL) {
     return;
   }
 
@@ -38,37 +38,39 @@ void destroy_http_query(HttpQuery* query) {
   free(query);
 }
 
-const char* query_get(const HttpQuery* query, const char* key) {
-  if(query == NULL || query->params == NULL || query->length == 0) {
+const char *query_get(const HttpQuery *query, const char *key) {
+  if (query == NULL || query->params == NULL || query->length == 0) {
     return NULL;
   }
 
-  for (size_t i =0; i < query->length;i++) {
-    if(strcmp(query->params[i].key, key) == 0) {
+  for (size_t i = 0; i < query->length; i++) {
+    if (strcmp(query->params[i].key, key) == 0) {
       return query->params[i].value;
     }
   }
 
   return NULL;
 }
-bool query_add(HttpQuery* query, const char* key, const char* value) {
-  assert(query && "query_add: query is null, did you forgot to call create_http_query()?");
+bool query_add(HttpQuery *query, const char *key, const char *value) {
+  assert(
+      query &&
+      "query_add: query is null, did you forgot to call create_http_query()?");
   assert(key && "query_add: key cannot be null.");
   assert(value && "query_add: value cannot be null.");
 
-  if(query->params == NULL) {
+  if (query->params == NULL) {
     query->params = malloc(sizeof(KeyValuePair) * 1);
-    if(query->params == NULL) {
+    if (query->params == NULL) {
       return false;
     }
 
     query->capacity = 1;
   }
 
-  if(query->length == query->capacity) {
+  if (query->length == query->capacity) {
     KeyValuePair *temp;
     temp = realloc(query->params, sizeof(KeyValuePair) * (query->capacity + 1));
-    if(temp == NULL) {
+    if (temp == NULL) {
       return false;
     }
 
@@ -79,23 +81,23 @@ bool query_add(HttpQuery* query, const char* key, const char* value) {
   size_t key_length = strlen(key) + 1;
   size_t value_length = strlen(value) + 1;
 
-  char* key_copy = malloc(sizeof(char) * key_length);
-  if(key_copy == NULL) {
+  char *key_copy = malloc(sizeof(char) * key_length);
+  if (key_copy == NULL) {
     return false;
   }
-  char* value_copy = malloc(sizeof(char) * value_length);
-  if(value_copy == NULL) {
+  char *value_copy = malloc(sizeof(char) * value_length);
+  if (value_copy == NULL) {
     free(key_copy);
     return false;
   }
 
-  if(strcpy_s(key_copy, key_length, key)) {
+  if (strcpy_s(key_copy, key_length, key)) {
     free(key_copy);
     free(value_copy);
     return false;
   }
 
-  if(strcpy_s(value_copy, value_length, value))  {
+  if (strcpy_s(value_copy, value_length, value)) {
     free(key_copy);
     free(value_copy);
     return false;
@@ -106,4 +108,14 @@ bool query_add(HttpQuery* query, const char* key, const char* value) {
   query->length++;
   return true;
 }
+const char *query_get_key_at_index(HttpQuery *query, size_t index) {
+  assert(index < query->length);
 
+  return query->params[index].key;
+}
+const char *query_get_value_at_index(HttpQuery *query, size_t index) {
+  assert(index < query->length);
+
+  return query->params[index].value;
+}
+size_t query_count(HttpQuery *query) { return query->length; }

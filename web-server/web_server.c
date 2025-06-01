@@ -52,8 +52,8 @@ typedef struct HttpRequest {
   char *route;
   HttpQuery *query;
   HttpHeaders *headers;
-  int content_length;
-  int content_read;
+  size_t content_length;
+  size_t content_read;
 
   struct SocketState *socket_state;
   HttpRequestParsingContext context;
@@ -128,6 +128,7 @@ static bool cyctle_buffer_add_char(CycleBuffer *buffer, char c) {
   buffer->buffer[buffer->end++] = c;
   buffer->end = buffer->end % BUFFER_SIZE;
   buffer->empty = false;
+  return true;
 }
 
 static bool cyctle_buffer_take_char(CycleBuffer *buffer, char *out_c) {
@@ -141,6 +142,7 @@ static bool cyctle_buffer_take_char(CycleBuffer *buffer, char *out_c) {
   if (buffer->start == buffer->end) {
     buffer->empty = true;
   }
+  return true;
 }
 
 static bool cyctle_buffer_is_empty(const CycleBuffer *buffer) {
@@ -159,6 +161,7 @@ typedef struct SocketState {
 
   HttpRequest http_request;
   HttpResponse http_response;
+  WebServer *server;
 } SocketState;
 
 enum HttpMethod req_get_method(const HttpRequest *req) {
@@ -301,7 +304,8 @@ bool res_can_write(const HttpResponse *res) {
   assert(res->socket_state &&
          "res_can_write: res has a null socket_state, something went wrong!");
 
-  if (res->state != HTTP_RESPONSE_WRITING_BODY) {
+  if (res->state != HTTP_RESPONSE_WRITING_BODY ||
+      res->headers_send_state == SOCKET_SEND_ACTIVE) {
     return false;
   }
 
@@ -337,11 +341,18 @@ size_t res_wirte(HttpResponse *res, const char *buffer, size_t length) {
   return chars_wrote_count;
 }
 
-typedef void (*request_handler)(HttpRequest* req, HttpResponse* res);
+typedef void (*RequestHandlerFunc)(HttpRequest *req, HttpResponse *res);
+typedef void (*RequestHandlerCleanup)(void *context);
 
 typedef struct WebServer {
   SocketState socket_states[MAX_CONNECTIONS];
-
+  struct RouteReqHandler {
+    HttpMethod method;
+    const char *route;
+    RequestHandlerFunc handler;
+    RequestHandlerCleanup cleanup;
+  } *request_handlers;
+  size_t request_handlers_count;
 } WebServer;
 
 static void accept_connection(WebServer *server, SOCKET listen_socket);
@@ -353,7 +364,10 @@ static unsigned long long get_currect_time_stamp();
 static void parse_request_header(SocketState *socket_state);
 static void fill_send_with_headers(SocketState *socket_state);
 static void zero_socket_state(SocketState *state);
-static request_handler find_matching_handler(WebServer *server, HttpRequest* req);
+static RequestHandlerFunc find_matching_handler(WebServer *server,
+                                                HttpRequest *req);
+static RequestHandlerCleanup find_matching_cleanup(WebServer *server,
+                                                   HttpRequest *req);
 
 int web_server_run(WebServer *server) {
   WSAData wsa_data;
@@ -406,7 +420,7 @@ int web_server_run(WebServer *server) {
 
   SocketState *sockets = server->socket_states;
 
-    for (size_t i = 0; i < MAX_CONNECTIONS; i++) {
+  for (size_t i = 0; i < MAX_CONNECTIONS; i++) {
     zero_socket_state(&sockets[i]);
   }
 
@@ -457,6 +471,14 @@ int web_server_run(WebServer *server) {
         parse_request_header(&sockets[i]);
       }
 
+      if (sockets[i].http_request.state &
+              (HTTP_REQUEST_READING_BODY | HTTP_REQUSET_DONE) &&
+          sockets[i].http_response.state != HTTP_RESPONSE_DONE) {
+        RequestHandlerFunc handler =
+            find_matching_handler(server, &sockets[i].http_request);
+        handler(&sockets[i].http_request, &sockets[i].http_response);
+      }
+
       // fill send buffer with headers
       if (sockets[i].http_response.headers_send_state == SOCKET_SEND_ACTIVE) {
         fill_send_with_headers(&sockets[i]);
@@ -471,15 +493,16 @@ int web_server_run(WebServer *server) {
       }
 
       // if done sending close connection
-      if (sockets[i].http_response.state == HTTP_RESPONSE_DONE &&
-          sockets[i].send_state != SOCKET_SEND_ACTIVE) {
+      if ((sockets[i].http_response.state == HTTP_RESPONSE_DONE &&
+           sockets[i].send_state != SOCKET_SEND_ACTIVE) ||
+          sockets[i].timeout_time < current_time) {
+        RequestHandlerCleanup cleanup =
+            find_matching_cleanup(server, &sockets[i].http_request);
+        if (cleanup) {
+          cleanup(sockets[i].http_response.context);
+        }
         remove_connection(server, i);
       }
-
-      // if time out remove connection
-      // if (sockets[i].timeout_time < current_time){
-      //  remove_connection(server, i);
-      //}
     }
   }
 
@@ -489,6 +512,9 @@ int web_server_run(WebServer *server) {
     }
     remove_connection(server, i);
   }
+
+  free(server->request_handlers);
+  free(server);
 
   printf("Server: Closing Connection.\n");
   closesocket(listen_socket);
@@ -559,7 +585,7 @@ static bool add_connection(WebServer *server, SOCKET connection_socket) {
 
       state->http_response.state = HTTP_RESPONSE_WRITING_STATUS_CODE;
       state->http_response.headers_send_state = SOCKET_SEND_IDLE;
-      state->http_response.headers = NULL;
+      state->http_response.headers = create_http_headers();
       state->http_response.write_headers_index[0] = 0;
       state->http_response.write_headers_index[1] = 0;
       state->http_response.write_headers_index[2] = 0;
@@ -568,6 +594,7 @@ static bool add_connection(WebServer *server, SOCKET connection_socket) {
 
       state->timeout_time =
           get_currect_time_stamp() + (TIME_OUT_IN_SEC * 1000000000ull);
+      state->server = server;
       return true;
     }
   }
@@ -576,7 +603,6 @@ static bool add_connection(WebServer *server, SOCKET connection_socket) {
 
 static void zero_socket_state(SocketState *state) {
   state->socket = 0;
-
   state->recv_state = 0;
   state->recv_buffer.start = 0;
   state->recv_buffer.end = 0;
@@ -585,48 +611,27 @@ static void zero_socket_state(SocketState *state) {
   state->send_buffer.start = 0;
   state->send_buffer.end = 0;
   state->send_buffer.empty = true;
-
   state->http_request.state = 0;
-
-  free(state->http_request.route);
   state->http_request.route = NULL;
-
-  destroy_http_query(state->http_request.query);
   state->http_request.query = NULL;
-
-  destroy_http_headers(state->http_request.headers);
   state->http_request.headers = NULL;
-
   state->http_request.content_length = 0;
   state->http_request.content_read = 0;
-
   state->http_request.context.step = 0;
-
-  free(state->http_request.context.method);
   state->http_request.context.method = NULL;
-
-  free(state->http_request.context.request_target);
   state->http_request.context.request_target = NULL;
-
-  free(state->http_request.context.version);
   state->http_request.context.version = NULL;
-
-  free(state->http_request.context.field_lines);
   state->http_request.context.field_lines = NULL;
   state->http_request.socket_state = NULL;
-
   state->http_response.state = 0;
-
   state->http_response.headers_send_state = 0;
   state->http_response.write_headers_index[0] = 0;
   state->http_response.write_headers_index[1] = 0;
   state->http_response.write_headers_index[2] = 0;
-  destroy_http_headers(state->http_response.headers);
   state->http_response.headers = NULL;
-
   state->http_response.socket_state = NULL;
-
   state->timeout_time = 0;
+  state->server = 0;
 }
 
 static void remove_connection(WebServer *server, size_t index) {
@@ -639,6 +644,14 @@ static void remove_connection(WebServer *server, size_t index) {
   SocketState *state = &server->socket_states[index];
 
   closesocket(state->socket);
+  free(state->http_request.route);
+  destroy_http_query(state->http_request.query);
+  destroy_http_headers(state->http_request.headers);
+  free(state->http_request.context.method);
+  free(state->http_request.context.request_target);
+  free(state->http_request.context.version);
+  free(state->http_request.context.field_lines);
+  destroy_http_headers(state->http_response.headers);
   zero_socket_state(state);
 }
 
@@ -701,7 +714,7 @@ static void send_data(SocketState *socket_state) {
     cyctle_buffer_take_char(&socket_state->send_buffer, &temp_buffer[i]);
   }
 
-  size_t bytes_sent = send(msg_socket, temp_buffer, sizeof(temp_buffer), 0);
+  size_t bytes_sent = send(msg_socket, temp_buffer, used_space, 0);
   if (SOCKET_ERROR == bytes_sent) {
     printf("Server: Error at send(): %d\n", WSAGetLastError());
     socket_state->send_state = SOCKET_SEND_FINISHED;
@@ -716,8 +729,9 @@ static void send_data(SocketState *socket_state) {
     return;
   }
 
-  if (bytes_sent == used_space) {
-    socket_state->send_state = SOCKET_SEND_IDLE;
+  if (socket_state->http_response.state == HTTP_RESPONSE_DONE &&
+      used_space == bytes_sent) {
+    socket_state->send_state = SOCKET_SEND_FINISHED;
   }
 }
 
@@ -728,7 +742,8 @@ static void fill_send_with_headers(SocketState *socket_state) {
     return;
   }
 
-  if (socket_state->http_response.state != HTTP_RESPONSE_WRITING_BODY) {
+  if (socket_state->http_response.state != HTTP_RESPONSE_WRITING_BODY &&
+      socket_state->http_response.state != HTTP_RESPONSE_DONE) {
     return;
   }
 
@@ -757,9 +772,13 @@ static void fill_send_with_headers(SocketState *socket_state) {
 
     if (word_index == word_len) {
       if (is_value) {
-        is_value = 0;
-        headers_index++;
-        word_index = 0;
+        if (free_space > 1) {
+          cyctle_buffer_add_char(&socket_state->send_buffer, '\r');
+          cyctle_buffer_add_char(&socket_state->send_buffer, '\n');
+          is_value = 0;
+          headers_index++;
+          word_index = 0;
+        }
       } else {
         if (free_space > 1) {
           cyctle_buffer_add_char(&socket_state->send_buffer, ':');
@@ -777,7 +796,11 @@ static void fill_send_with_headers(SocketState *socket_state) {
   socket_state->http_response.write_headers_index[2] = word_index;
 
   if (headers_index == total_count) {
-    socket_state->http_response.headers_send_state = SOCKET_SEND_FINISHED;
+    if (free_space > 1) {
+      cyctle_buffer_add_char(&socket_state->send_buffer, '\r');
+      cyctle_buffer_add_char(&socket_state->send_buffer, '\n');
+      socket_state->http_response.headers_send_state = SOCKET_SEND_FINISHED;
+    }
   }
 }
 
@@ -937,8 +960,11 @@ static void parse_request_target(SocketState *socket_state) {
   }
 
   char *q_mark = strchr(context->request_target, '?');
+  size_t route_len = 0;
   if (q_mark != NULL) {
     q_mark[0] = 0;
+    route_len = strlen(context->request_target);
+
     char *key = q_mark + 1;
 
     while (1) {
@@ -957,15 +983,39 @@ static void parse_request_target(SocketState *socket_state) {
         // TODO: do something?
       }
 
+      eq_mark[0] = '=';
+
       if (and_mark == NULL) {
         break;
       } else {
         key = and_mark + 1;
+        and_mark[0] = '&';
       }
     }
+
+    q_mark[0] = '?';
+  } else {
+    route_len = strlen(context->request_target);
   }
 
-  socket_state->http_request.route = context->request_target;
+  socket_state->http_request.route = malloc(sizeof(char) * (route_len + 1));
+  if (socket_state->http_request.route == NULL) {
+    set_response_server_error(socket_state);
+    return;
+  }
+
+  size_t request_target_len = strlen(context->request_target);
+  if (request_target_len > route_len) {
+    context->request_target[route_len] = 0;
+  }
+  if (strcpy_s(socket_state->http_request.route, route_len + 1,
+               context->request_target)) {
+    set_response_server_error(socket_state);
+    return;
+  }
+  if (request_target_len > route_len) {
+    context->request_target[route_len] = '?';
+  }
   // TODO: do proper validation on route
   context->step = HTTP_REQUEST_PARSING_REQUEST_VERSION;
 }
@@ -1089,7 +1139,6 @@ static void parse_request_field_liens(SocketState *socket_state) {
 
     // finished reading headers
     context->field_lines[current_len - 2] = 0;
-    current_len = current_len - 2;
 
     char *key = context->field_lines;
     while (key[0] != 0) {
@@ -1130,12 +1179,17 @@ static void parse_request_field_liens(SocketState *socket_state) {
         // TODO: do something?
       }
 
+      cul_mark[0] = ':';
+
       if (cr_mark == NULL) {
         break;
       } else {
         key = cr_mark + 1;
+        cr_mark[0] = '\r';
       }
     }
+
+    context->field_lines[current_len - 2] = '\r';
 
     context->step = HTTP_REQUEST_PARSING_DONE;
     return;
@@ -1185,17 +1239,333 @@ static void parse_request_header(SocketState *socket_state) {
   }
 }
 
-static request_handler find_matching_handler(WebServer* server, HttpRequest* req) {
-    server-
+static void not_found_request_handler(HttpRequest *req, HttpResponse *res) {
+  res_set_status_code(res, HTTP_STATUS_NOT_FOUND);
+  res_finish_headers(res);
+  res_finish_write(res);
+}
+
+static RequestHandlerFunc find_matching_handler(WebServer *server,
+                                                HttpRequest *req) {
+  for (size_t i = 1; i < server->request_handlers_count; i++) {
+
+    if (server->request_handlers[i].method == req->method &&
+        _stricmp(server->request_handlers[i].route, req->route) == 0) {
+      return server->request_handlers[i].handler;
+    }
+  }
+
+  return server->request_handlers[0].handler;
+}
+
+static RequestHandlerCleanup find_matching_cleanup(WebServer *server,
+                                                   HttpRequest *req) {
+  for (size_t i = 1; i < server->request_handlers_count; i++) {
+
+    if (server->request_handlers[i].method == req->method &&
+        _stricmp(server->request_handlers[i].route, req->route) == 0) {
+      return server->request_handlers[i].cleanup;
+    }
+  }
+
+  return NULL;
+}
+
+typedef struct TraceContext {
+  size_t sent;
+  size_t length;
+  const char *body;
+} TraceContext;
+
+static void trace_cleanup(TraceContext *context) {
+  if (context != NULL) {
+    free(context->body);
+    free(context);
+  }
+}
+
+static void trace_func(HttpRequest *req, HttpResponse *res) {
+  TraceContext *context = res_get_context(res);
+  if (context == NULL) {
+    const char *method = req->context.method;
+    const char *request_target = req->context.request_target;
+    const char *version = req->context.version;
+    const char *field_lines = req->context.field_lines;
+    HttpHeaders *headers = req_get_headers(req);
+    size_t header_count = headers_count(headers);
+
+    size_t method_len = strlen(method);
+    size_t request_target_len = strlen(request_target);
+    size_t version_len = strlen(version);
+    size_t field_lines_len = strlen(field_lines);
+    //                       TRACE / HTTP/1.1                       \r\n
+    //                       \n*headers                      \n\0
+    size_t size = method_len + 1 + request_target_len + 1 + version_len + 1 +
+                  1 + header_count + field_lines_len + 1 + 1;
+    char *buffer = malloc(sizeof(char) * size);
+    if (buffer == NULL) {
+      set_response_server_error(res);
+      return;
+    }
+    size_t wrote = 0;
+    for (size_t i = 0; i < method_len; i++) {
+      buffer[wrote++] = method[i];
+    }
+
+    buffer[wrote++] = ' ';
+
+    for (size_t i = 0; i < request_target_len; i++) {
+      buffer[wrote++] = request_target[i];
+    }
+
+    buffer[wrote++] = ' ';
+
+    for (size_t i = 0; i < version_len; i++) {
+      buffer[wrote++] = version[i];
+    }
+
+    buffer[wrote++] = '\r';
+    buffer[wrote++] = '\n';
+
+    for (size_t i = 0; i < field_lines_len; i++) {
+      buffer[wrote++] = field_lines[i];
+      if (field_lines[i] == '\r') {
+        buffer[wrote++] = '\n';
+      }
+    }
+
+    buffer[wrote] = 0;
+
+    TraceContext *context = malloc(sizeof(TraceContext));
+    if (context == NULL) {
+      free(buffer);
+      set_response_server_error(res);
+      return;
+    }
+
+    context->body = buffer;
+    context->length = wrote;
+    context->sent = 0;
+    res_set_status_code(res, HTTP_STATUS_OK);
+    HttpHeaders *response_headers = res_get_headers(res);
+    char leng[256];
+    sprintf_s(leng, 256, "%zu", wrote);
+    headers_add(response_headers, "Content-Length", leng);
+    headers_add(response_headers, "Content-Type", "message/http");
+    res_finish_headers(res);
+    res_set_context(res, context);
+  }
+
+  while (res_can_write(res) && context->sent != context->length) {
+    size_t wrote = res_wirte(res, context->body + context->sent,
+                             context->length - context->sent);
+    context->sent += wrote;
+  }
+
+  if (context->sent == context->length) {
+    res_finish_write(res);
+  }
 }
 
 WebServer *create_web_server() {
   WebServer *server = malloc(sizeof(WebServer));
   assert(server);
 
-  
+  server->request_handlers_count = 3;
+  server->request_handlers =
+      malloc(sizeof(struct RouteReqHandler) * server->request_handlers_count);
 
+  assert(server->request_handlers);
+
+  server->request_handlers[0].route = "*NOT FOUND*";
+  server->request_handlers[0].handler = not_found_request_handler;
+  server->request_handlers[0].cleanup = NULL;
+
+  server->request_handlers[1].method = HTTP_TRACE;
+  server->request_handlers[1].route = "/";
+  server->request_handlers[1].handler = trace_func;
+  server->request_handlers[1].cleanup = trace_cleanup;
+
+  server->request_handlers[2].method = HTTP_TRACE;
+  server->request_handlers[2].route = "*";
+  server->request_handlers[2].handler = trace_func;
+  server->request_handlers[2].cleanup = trace_cleanup;
   return server;
 }
-void web_server_map_get(const char *route,
-                        void (*func)(HttpRequest *req, HttpResponse *res));
+
+static void options_func(HttpRequest *req, HttpResponse *res) {
+  WebServer *server = req->socket_state->server;
+
+  HttpMethod methods[HTTP_METHOD_LENGTH] = {0};
+  size_t count = 0;
+  for (size_t i = 1; i < server->request_handlers_count; i++) {
+    if (_stricmp(server->request_handlers[i].route, req->route) == 0) {
+      methods[count++] = server->request_handlers[i].method;
+    }
+  }
+
+  char allow[HTTP_METHOD_LENGTH * MAX_HTTP_METHOD_LENGTH] = {0};
+  size_t wrote = 0;
+  for (size_t i = 0; i < count; i++) {
+    const char *name = http_method_name(methods[i]);
+    size_t len = strlen(name);
+    for (size_t j = 0; j < len; j++) {
+      allow[wrote++] = name[j];
+    }
+
+    if (i < count - 1) {
+      allow[wrote++] = ',';
+      allow[wrote++] = ' ';
+    }
+  }
+  allow[wrote] = 0;
+  res_set_status_code(res, HTTP_STATUS_NO_CONTENT);
+  HttpHeaders *headers = res_get_headers(res);
+  headers_add(headers, "Allow", allow);
+  res_finish_headers(res);
+  res_finish_write(res);
+}
+
+static void map_options_if_not_exists(WebServer *server, const char *route) {
+  for (size_t i = 1; i < server->request_handlers_count; i++) {
+    if (server->request_handlers[i].method == HTTP_OPTIONS &&
+        _stricmp(server->request_handlers[i].route, route) == 0) {
+      return;
+    }
+  }
+
+  server->request_handlers_count = server->request_handlers_count + 1;
+  struct RouteReqHandler *temp =
+      realloc(server->request_handlers,
+              sizeof(struct RouteReqHandler) * server->request_handlers_count);
+  server->request_handlers = temp;
+  assert(server->request_handlers);
+
+  server->request_handlers[server->request_handlers_count - 1].method =
+      HTTP_OPTIONS;
+  server->request_handlers[server->request_handlers_count - 1].route = route;
+  server->request_handlers[server->request_handlers_count - 1].handler =
+      options_func;
+  server->request_handlers[server->request_handlers_count - 1].cleanup = NULL;
+}
+
+static void head_func(HttpRequest *req, HttpResponse *res) {
+  WebServer *server = req->socket_state->server;
+
+  RequestHandlerFunc handler = NULL;
+  RequestHandlerCleanup cleanup = NULL;
+  for (size_t i = 1; i < server->request_handlers_count; i++) {
+    if (server->request_handlers[i].method == HTTP_GET &&
+        _stricmp(server->request_handlers[i].route, req->route) == 0) {
+      handler = server->request_handlers[i].handler;
+      cleanup = server->request_handlers[i].cleanup;
+    }
+  }
+
+  assert(handler);
+  req->method = HTTP_GET;
+  handler(req, res);
+  req->method = HTTP_HEAD;
+
+  if (res->state == HTTP_RESPONSE_WRITING_BODY) {
+    res->state = HTTP_RESPONSE_DONE;
+  }
+
+  if (cleanup) {
+    cleanup(res->context);
+  }
+}
+
+static void map_head(WebServer *server, const char *route) {
+  server->request_handlers_count = server->request_handlers_count + 1;
+  struct RouteReqHandler *temp =
+      realloc(server->request_handlers,
+              sizeof(struct RouteReqHandler) * server->request_handlers_count);
+  server->request_handlers = temp;
+  assert(server->request_handlers);
+
+  server->request_handlers[server->request_handlers_count - 1].method =
+      HTTP_HEAD;
+  server->request_handlers[server->request_handlers_count - 1].route = route;
+  server->request_handlers[server->request_handlers_count - 1].handler =
+      head_func;
+  server->request_handlers[server->request_handlers_count - 1].cleanup = NULL;
+}
+
+void web_server_map_get(WebServer *server, const char *route,
+                        void (*func)(HttpRequest *req, HttpResponse *res),
+                        void (*cleanup)(void *context)) {
+
+  server->request_handlers_count = server->request_handlers_count + 1;
+  struct RouteReqHandler *temp =
+      realloc(server->request_handlers,
+              sizeof(struct RouteReqHandler) * server->request_handlers_count);
+  server->request_handlers = temp;
+  assert(server->request_handlers);
+
+  server->request_handlers[server->request_handlers_count - 1].method =
+      HTTP_GET;
+  server->request_handlers[server->request_handlers_count - 1].route = route;
+  server->request_handlers[server->request_handlers_count - 1].handler = func;
+  server->request_handlers[server->request_handlers_count - 1].cleanup =
+      cleanup;
+  map_options_if_not_exists(server, route);
+  map_head(server, route);
+}
+void web_server_map_post(WebServer *server, const char *route,
+                         void (*func)(HttpRequest *req, HttpResponse *res),
+                         void (*cleanup)(void *context)) {
+
+  server->request_handlers_count = server->request_handlers_count + 1;
+  struct RouteReqHandler *temp =
+      realloc(server->request_handlers,
+              sizeof(struct RouteReqHandler) * server->request_handlers_count);
+  server->request_handlers = temp;
+  assert(server->request_handlers);
+
+  server->request_handlers[server->request_handlers_count - 1].method =
+      HTTP_POST;
+  server->request_handlers[server->request_handlers_count - 1].route = route;
+  server->request_handlers[server->request_handlers_count - 1].handler = func;
+  server->request_handlers[server->request_handlers_count - 1].cleanup =
+      cleanup;
+  map_options_if_not_exists(server, route);
+}
+void web_server_map_put(WebServer *server, const char *route,
+                        void (*func)(HttpRequest *req, HttpResponse *res),
+                        void (*cleanup)(void *context)) {
+
+  server->request_handlers_count = server->request_handlers_count + 1;
+  struct RouteReqHandler *temp =
+      realloc(server->request_handlers,
+              sizeof(struct RouteReqHandler) * server->request_handlers_count);
+  server->request_handlers = temp;
+  assert(server->request_handlers);
+
+  server->request_handlers[server->request_handlers_count - 1].method =
+      HTTP_PUT;
+  server->request_handlers[server->request_handlers_count - 1].route = route;
+  server->request_handlers[server->request_handlers_count - 1].handler = func;
+  server->request_handlers[server->request_handlers_count - 1].cleanup =
+      cleanup;
+  map_options_if_not_exists(server, route);
+}
+void web_server_map_delete(WebServer *server, const char *route,
+                           void (*func)(HttpRequest *req, HttpResponse *res),
+                           void (*cleanup)(void *context)) {
+
+  server->request_handlers_count = server->request_handlers_count + 1;
+  struct RouteReqHandler *temp =
+      realloc(server->request_handlers,
+              sizeof(struct RouteReqHandler) * server->request_handlers_count);
+  server->request_handlers = temp;
+  assert(server->request_handlers);
+
+  server->request_handlers[server->request_handlers_count - 1].method =
+      HTTP_DELETE;
+  server->request_handlers[server->request_handlers_count - 1].route = route;
+  server->request_handlers[server->request_handlers_count - 1].handler = func;
+  server->request_handlers[server->request_handlers_count - 1].cleanup =
+      cleanup;
+  map_options_if_not_exists(server, route);
+}

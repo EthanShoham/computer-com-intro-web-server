@@ -15,37 +15,54 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\..\tcp-server\http_headers.h">
+    <ClCompile Include="..\..\main.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\web-server\web-server-internal\http_headers_internal.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\web-server\web-server-internal\http_query_internal.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\web-server\web_server.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\web-server\web-server-internal\http_headers_internal.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\tcp-server\http_method.h">
+    <ClInclude Include="..\..\web-server\web-server-internal\http_query_internal.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\tcp-server\http_query.h">
+    <ClInclude Include="..\..\web-server\web-server-internal\key_value_pair.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\tcp-server\http_request.h">
+    <ClInclude Include="..\..\web-server\http_headers.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\tcp-server\http_response.h">
+    <ClInclude Include="..\..\web-server\http_method.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\tcp-server\http_status_code.h">
+    <ClInclude Include="..\..\web-server\http_query.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\tcp-server\web_server.h">
+    <ClInclude Include="..\..\web-server\http_request.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\web-server\http_response.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\web-server\http_status_code.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\web-server\web_server.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\..\tcp-server\web_server.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\tcp-server\web-server-internal\http_headers_internal.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\tcp-server\web-server-internal\http_query_internal.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
+    <CopyFileToFolders Include="..\..\html\index.he.html" />
+    <CopyFileToFolders Include="..\..\html\index.html" />
+    <CopyFileToFolders Include="..\..\html\index.fr.html" />
   </ItemGroup>
 </Project>

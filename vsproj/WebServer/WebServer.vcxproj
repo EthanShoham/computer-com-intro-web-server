@@ -129,18 +129,39 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="..\..\tcp-server\http_headers.h" />
-    <ClInclude Include="..\..\tcp-server\http_method.h" />
-    <ClInclude Include="..\..\tcp-server\http_query.h" />
-    <ClInclude Include="..\..\tcp-server\http_request.h" />
-    <ClInclude Include="..\..\tcp-server\http_response.h" />
-    <ClInclude Include="..\..\tcp-server\http_status_code.h" />
-    <ClInclude Include="..\..\tcp-server\web_server.h" />
+    <ClCompile Include="..\..\main.c" />
+    <ClCompile Include="..\..\web-server\web-server-internal\http_headers_internal.c" />
+    <ClCompile Include="..\..\web-server\web-server-internal\http_query_internal.c" />
+    <ClCompile Include="..\..\web-server\web_server.c" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\..\tcp-server\web-server-internal\http_headers_internal.c" />
-    <ClCompile Include="..\..\tcp-server\web-server-internal\http_query_internal.c" />
-    <ClCompile Include="..\..\tcp-server\web_server.c" />
+    <ClInclude Include="..\..\web-server\http_headers.h" />
+    <ClInclude Include="..\..\web-server\http_method.h" />
+    <ClInclude Include="..\..\web-server\http_query.h" />
+    <ClInclude Include="..\..\web-server\http_request.h" />
+    <ClInclude Include="..\..\web-server\http_response.h" />
+    <ClInclude Include="..\..\web-server\http_status_code.h" />
+    <ClInclude Include="..\..\web-server\web-server-internal\http_headers_internal.h" />
+    <ClInclude Include="..\..\web-server\web-server-internal\http_query_internal.h" />
+    <ClInclude Include="..\..\web-server\web-server-internal\key_value_pair.h" />
+    <ClInclude Include="..\..\web-server\web_server.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <CopyFileToFolders Include="..\..\html\index.fr.html">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</ExcludedFromBuild>
+      <DeploymentContent Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</DeploymentContent>
+      <RootFolder Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">..\..\html</RootFolder>
+    </CopyFileToFolders>
+    <CopyFileToFolders Include="..\..\html\index.he.html">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</ExcludedFromBuild>
+      <DeploymentContent Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</DeploymentContent>
+      <RootFolder Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">..\..\html</RootFolder>
+    </CopyFileToFolders>
+    <CopyFileToFolders Include="..\..\html\index.html">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</ExcludedFromBuild>
+      <DeploymentContent Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</DeploymentContent>
+      <RootFolder Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">..\..\html</RootFolder>
+    </CopyFileToFolders>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

@@ -2,8 +2,8 @@
 #define KEY_VALUE_PAIR
 
 typedef struct KeyValuePair {
-  char* key;
-  char* value;
+  char *key;
+  char *value;
 } KeyValuePair;
 
 #endif // !KEY_VALUE_PAIR

@@ -3,6 +3,7 @@
 
 typedef enum HttpStatusCode {
   HTTP_STATUS_OK = 200,
+  HTTP_STATUS_NO_CONTENT = 202,
   HTTP_STATUS_BAD_REQUEST = 400,
   HTTP_STATUS_NOT_FOUND = 404,
   HTTP_STATUS_SERVER_ERROR = 500,
@@ -21,6 +22,8 @@ inline const char *http_status_reason_phrase(HttpStatusCode code) {
     return "Internal Server Error";
   case HTTP_STATUS_HTTP_VERSION_NOT_SUPPORTED:
     return "HTTP Version Not Supported";
+  case HTTP_STATUS_NO_CONTENT:
+    return "No Content";
   default:
     return "";
   }
