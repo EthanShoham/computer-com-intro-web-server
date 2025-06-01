@@ -387,14 +387,14 @@ int web_server_run(WebServer *server) {
 
   sockaddr_in server_service;
   server_service.sin_family = AF_INET;
-  if (!inet_pton(AF_INET, "127.0.0.1", &server_service.sin_addr.s_addr)) {
+  /*if (!inet_pton(AF_INET, "127.0.0.1", &server_service.sin_addr.s_addr)) {
     printf("Server: Error at converting string ip to number: %d\n",
            WSAGetLastError());
     closesocket(listen_socket);
     WSACleanup();
     return 1;
-  }
-  // server_service.sin_addr.s_addr = INADDR_ANY;
+  }*/
+  server_service.sin_addr.s_addr = INADDR_ANY;
   server_service.sin_port = htons(SERVER_PORT);
 
   if (SOCKET_ERROR == bind(listen_socket, (SOCKADDR *)&server_service,
