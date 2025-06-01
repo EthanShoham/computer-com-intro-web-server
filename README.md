@@ -16,12 +16,27 @@ The server supports the following HTTP methods:
 
 ### Root
 
+- **TRACE /**
+  Returns trace from root
+
+- **OPTIONS /**
+  Returns options from root
+
+- **HEAD /**
+  Returns headers from root
+
 - **GET /**  
   Returns a Lorem Ipsum page
   Optional query parameter:
   - `lang`: Specifies the language of the response. Accepted values are `he`, `en`, or `fr`.
 
 ### Students
+
+- **OPTIONS /students**
+  Returns options from /students
+
+- **HEAD /students**
+  Returns headers from /students
 
 - **GET /students**  
   Retrieves a list of all saved students.
